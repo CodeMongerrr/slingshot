@@ -171,14 +171,14 @@ func showToast(_ text: String) {
 
 enum HandPose { case open, fist, unknown }
 
-func classify(_ obs: VNHumanHandPoseObservation) -> (pose: HandPose, debug: String) {
+func classify(_ obs: VNHumanHandPoseObservation) -> (pose: HandPose, wrist: CGPoint?, debug: String) {
     func point(_ j: VNHumanHandPoseObservation.JointName) -> CGPoint? {
-        guard let p = try? obs.recognizedPoint(j), p.confidence > 0.2 else { return nil }
+        guard let p = try? obs.recognizedPoint(j), p.confidence > 0.25 else { return nil }
         return p.location
     }
-    guard let wrist = point(.wrist), let mcp = point(.middleMCP) else { return (.unknown, "no wrist/palm") }
+    guard let wrist = point(.wrist), let mcp = point(.middleMCP) else { return (.unknown, nil, "no wrist/palm") }
     let handSize = hypot(wrist.x - mcp.x, wrist.y - mcp.y)
-    guard handSize > 0.02 else { return (.unknown, "hand too small") }
+    guard handSize > 0.02 else { return (.unknown, wrist, "hand too small") }
 
     let tips: [VNHumanHandPoseObservation.JointName] = [.indexTip, .middleTip, .ringTip, .littleTip]
     var extended = 0
@@ -188,128 +188,185 @@ func classify(_ obs: VNHumanHandPoseObservation) -> (pose: HandPose, debug: Stri
         if let p = point(tip) {
             let reach = hypot(p.x - wrist.x, p.y - wrist.y) / handSize
             reaches.append(String(format: "%.2f", reach))
-            if reach > 1.45 { extended += 1 } else if reach < 1.35 { curled += 1 }
+            if reach > 1.5 { extended += 1 } else if reach < 1.3 { curled += 1 }
         } else {
-            // A fingertip Vision can't see on a detected hand is usually curled into the palm.
+            // A fingertip Vision cannot see on a detected hand is usually curled into the palm.
             curled += 1
             reaches.append("hidden")
         }
     }
     let debug = "ext=\(extended) curl=\(curled) reach=[\(reaches.joined(separator: " "))]"
-    if extended == 4 { return (.open, debug) }
-    if extended == 0 && curled >= 2 { return (.fist, debug) }
-    return (.unknown, debug)
+    if extended == 4 { return (.open, wrist, debug) }
+    if extended == 0 && curled >= 3 { return (.fist, wrist, debug) }
+    return (.unknown, wrist, debug)
 }
 
 // MARK: - Gesture state machine
 
 final class GestureEngine {
     var onGrab: () -> Void = {}
-    var onRelease: () -> Void = {}       // fist seen, then hand opens: the "drop" gesture
-    var onReleasePrimed: () -> Void = {} // fist seen and steady: a drop may be coming
+    var onRelease: () -> Void = {}       // sustained fist, then open hand: the "drop" gesture
+    var onReleasePrimed: () -> Void = {} // the fist half of a drop is complete
     var grabAllowed: () -> Bool = { true }
     var debugLogging = true
 
-    private var openFrames = 0
-    private var fistFrames = 0
-    private var armedAt: Date?
+    // ~15 processed frames per second. A few off-frames (grace) are tolerated
+    // before a streak resets, since Vision drops frames during transitions.
+    private let armNeeded = 30          // 2 s of steady open palm to arm
+    private let grabNeeded = 15         // 1 s of steady fist to grab
+    private let releaseFistNeeded = 15  // 1 s of steady fist to prime a drop
+    private let releaseOpenNeeded = 8   // then 0.5 s of open hand to drop
+    private let grace = 4
+    private let armTimeout: TimeInterval = 6
+    private let releaseWindow: TimeInterval = 3
+    private let cooldown: TimeInterval = 2
+    private let maxWristJump: CGFloat = 0.08  // per frame, in normalized image space
+
+    private struct Streak {
+        var count = 0
+        private var miss = 0
+        private let grace: Int
+        init(grace: Int) { self.grace = grace }
+        mutating func hit() { count += 1; miss = 0 }
+        mutating func neutral() { miss += 1; if miss > grace { reset() } }
+        mutating func reset() { count = 0; miss = 0 }
+    }
+
+    private var lastPose: HandPose = .unknown
+    private var lastWrist: CGPoint?
+
+    private var openStreak: Streak
+    private var fistStreak: Streak
+    private var armed = false
+    private var armedAt = Date.distantPast
     private var cooldownUntil = Date.distantPast
     private var announcedReady = true
-    private var lastPose: HandPose = .unknown
 
-    private var seqFist = 0
-    private var seqOpen = 0
-    private var releasePrimedAt: Date?
-    private var releaseCooldownUntil = Date.distantPast
+    private var relFist: Streak
+    private var relOpen: Streak
+    private var relPrimedAt: Date?
+    private var relCooldownUntil = Date.distantPast
 
-    // Effective frame rate is ~15 fps (every 2nd camera frame).
-    private let framesToArm = 6      // ~0.4 s of steady open palm
-    private let framesToGrab = 2     // ~0.13 s of fist
-    private let armTimeout: TimeInterval = 3.0
-    private let cooldown: TimeInterval = 2.0
+    init() {
+        openStreak = Streak(grace: grace)
+        fistStreak = Streak(grace: grace)
+        relFist = Streak(grace: grace)
+        relOpen = Streak(grace: grace)
+    }
 
-    func update(pose: HandPose, debug: String = "") {
+    func update(pose: HandPose, wrist: CGPoint?, debug: String = "") {
         let now = Date()
         if debugLogging, pose != lastPose {
             log("   · pose → \(pose) (\(debug))")
         }
         lastPose = pose
 
-        // Fist→open "release" tracking, independent of the grab state machine
-        // (and of its cooldown: a release right after a grab must still register on the catching Mac).
-        switch pose {
-        case .fist:
-            seqFist += 1
-            seqOpen = 0
-            if seqFist >= 2 {
-                let stale = releasePrimedAt.map { now.timeIntervalSince($0) > 2.5 } ?? true
-                if stale { onReleasePrimed() }
-                releasePrimedAt = now
-            }
-        case .open:
-            seqOpen += 1
-            if seqOpen >= 2 {
-                if let primed = releasePrimedAt,
-                   now.timeIntervalSince(primed) < 2.5, now >= releaseCooldownUntil {
-                    releasePrimedAt = nil
-                    releaseCooldownUntil = now.addingTimeInterval(2.0)
-                    onRelease()
-                }
-                seqFist = 0
-            }
-        case .unknown:
-            break
+        // A jumping wrist is a moving or waving hand. Deliberate gestures hold still,
+        // so movement resets the timers instead of counting toward them.
+        var steady = true
+        if let w = wrist, let l = lastWrist {
+            steady = hypot(w.x - l.x, w.y - l.y) <= maxWristJump
         }
+        lastWrist = wrist
 
+        updateRelease(pose: pose, steady: steady, now: now)
+        updateGrab(pose: pose, steady: steady, now: now)
+    }
+
+    private func updateGrab(pose: HandPose, steady: Bool, now: Date) {
         guard now >= cooldownUntil else { return }
         if !announcedReady {
             announcedReady = true
             log("🔄 Ready. Show your palm to grab again")
         }
 
-        if let armed = armedAt {
-            if now.timeIntervalSince(armed) > armTimeout {
+        if armed {
+            if now.timeIntervalSince(armedAt) > armTimeout {
                 log("⌛️ Gesture timed out. Show your palm again")
-                reset()
+                disarm()
                 return
             }
             if !grabAllowed() {
-                reset()  // a hold or pending catch took over; stand down quietly
+                disarm()  // a hold or pending catch took over; stand down quietly
                 return
             }
             switch pose {
             case .fist:
-                fistFrames += 1
-                if fistFrames >= framesToGrab {
-                    reset()
+                if steady { fistStreak.hit() } else { fistStreak.reset() }
+                if fistStreak.count >= grabNeeded {
+                    disarm()
                     cooldownUntil = now.addingTimeInterval(cooldown)
                     announcedReady = false
                     onGrab()
                 }
             case .open:
                 armedAt = now  // palm still showing: stay armed
-                fistFrames = 0
+                fistStreak.reset()
             case .unknown:
-                break          // hand mid-transition; keep waiting
+                fistStreak.neutral()
             }
         } else {
-            if pose == .open && grabAllowed() {
-                openFrames += 1
-                if openFrames >= framesToArm {
-                    armedAt = Date()
+            if pose == .open && steady && grabAllowed() {
+                openStreak.hit()
+                if openStreak.count >= armNeeded {
+                    armed = true
+                    armedAt = now
+                    openStreak.reset()
                     play("Tink")
-                    log("✋ Palm detected. Close your fist to grab the screen")
+                    log("✋ Armed. Hold your fist for one second to grab")
                 }
+            } else if pose == .open {
+                openStreak.reset()  // moving palm: start over
             } else {
-                openFrames = 0
+                openStreak.neutral()
             }
         }
     }
 
-    private func reset() {
-        openFrames = 0
-        fistFrames = 0
-        armedAt = nil
+    private func updateRelease(pose: HandPose, steady: Bool, now: Date) {
+        if let primed = relPrimedAt {
+            if now.timeIntervalSince(primed) > releaseWindow {
+                relPrimedAt = nil
+                relOpen.reset()
+                return
+            }
+            switch pose {
+            case .open:
+                relOpen.hit()
+                if relOpen.count >= releaseOpenNeeded {
+                    relPrimedAt = nil
+                    relOpen.reset()
+                    relCooldownUntil = now.addingTimeInterval(cooldown)
+                    onRelease()
+                }
+            case .fist:
+                relOpen.reset()
+                relPrimedAt = now  // still holding the fist: keep the window fresh
+            case .unknown:
+                relOpen.neutral()
+            }
+        } else {
+            guard now >= relCooldownUntil else { return }
+            switch pose {
+            case .fist:
+                if steady { relFist.hit() } else { relFist.reset() }
+                if relFist.count >= releaseFistNeeded {
+                    relFist.reset()
+                    relPrimedAt = now
+                    onReleasePrimed()
+                }
+            case .open:
+                relFist.neutral()
+            case .unknown:
+                relFist.neutral()
+            }
+        }
+    }
+
+    private func disarm() {
+        armed = false
+        openStreak.reset()
+        fistStreak.reset()
     }
 }
 
@@ -414,9 +471,9 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
         holdGeneration += 1
         let gen = holdGeneration
         sendControl(["t": "hold"])
-        log("✊ Holding \(url.lastPathComponent). Open your fist at the receiving Mac within \(Int(holdWindow)) s")
+        log("✊ Holding \(url.lastPathComponent). At the receiving Mac: fist for 1 second, then open your hand. Expires in \(Int(holdWindow)) s")
         DispatchQueue.main.async {
-            showToast("✊ Holding screenshot. Open your fist at the other Mac to drop it")
+            showToast("✊ Holding screenshot. At the other Mac: fist for 1 second, then open your hand")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + holdWindow) { [weak self] in
             guard let self, self.holdGeneration == gen, self.heldFile != nil else { return }
@@ -517,10 +574,10 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
         switch type {
         case "hold":
             remoteHolder = id
-            log("🫴 \(id.displayName) is holding a screenshot. Fist, then open your hand at this Mac to catch it")
+            log("🫴 \(id.displayName) is holding a screenshot. Hold a fist for 1 second, then open your hand to catch it here")
             DispatchQueue.main.async {
                 play("Tink")
-                showToast("🫴 \(cleanName(id.displayName)) is holding a screenshot. Fist, then open, to catch it here")
+                showToast("🫴 \(cleanName(id.displayName)) is holding a screenshot. Fist for 1 second, then open, to catch it here")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + holdWindow + 2) { [weak self] in
                 if self?.remoteHolder == id { self?.remoteHolder = nil }
@@ -598,7 +655,7 @@ final class StatusUI: NSObject {
         item.button?.title = peers.isEmpty ? "✊…" : "✊✓"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v0.5", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v0.6", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         if peers.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -671,7 +728,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v0.5. Palm, then fist, and your screen flies to the nearest Mac")
+log("Slingshot v0.6. Palm, then fist, and your screen flies to the nearest Mac")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -736,10 +793,10 @@ func startEverything() {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         guard (try? handler.perform([handRequest])) != nil else { return }
         if let obs = handRequest.results?.first {
-            let (pose, debug) = classify(obs)
-            engine.update(pose: pose, debug: debug)
+            let (pose, wrist, debug) = classify(obs)
+            engine.update(pose: pose, wrist: wrist, debug: debug)
         } else {
-            engine.update(pose: .unknown, debug: "no hand")
+            engine.update(pose: .unknown, wrist: nil, debug: "no hand")
         }
     }
     camera = cam
@@ -752,7 +809,7 @@ func startEverything() {
         return
     }
 
-    log("🙌 Ready. Hold an open palm to the camera (~half a second), then close your fist.")
+    log("🙌 Ready. Hold your palm open and still for 2 seconds, then hold your fist for 1 second to grab.")
 }
 
 switch AVCaptureDevice.authorizationStatus(for: .video) {

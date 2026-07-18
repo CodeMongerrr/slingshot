@@ -2,15 +2,15 @@
 
 **Grab your Mac's screen with a fist. Watch it land on your friend's Mac.**
 
-Inspired by Huawei's Mate 70 air-gesture file transfer demo, rebuilt for the Apple ecosystem. Show your open palm to the camera and close your fist: camera flash, and a screenshot of your desktop is now *held in your hand*. Nothing is sent yet. Walk to the Mac you want it on and open your fist at its camera: it catches the drop, the file transfers to that Mac only, and zooms up on its screen with a chime. Don't drop it anywhere within 30 seconds and it quietly stays in your Pictures folder.
+Inspired by Huawei's Mate 70 air-gesture file transfer demo, rebuilt for the Apple ecosystem. Hold your palm open and still for two seconds, then hold your fist for one second: camera flash, and a screenshot of your desktop is now *held in your hand*. Nothing is sent yet. Walk to the Mac you want it on and open your fist at its camera: it catches the drop, the file transfers to that Mac only, and zooms up on its screen with a chime. Don't drop it anywhere within 30 seconds and it quietly stays in your Pictures folder.
 
 https://github.com/Giri-Aayush/slingshot
 
 ## How it works
 
-- **Gesture detection**: Apple's Vision framework (`VNDetectHumanHandPoseRequest`) tracks 21 hand joints from the FaceTime camera at ~15 fps. A small state machine arms on ~0.4 s of open palm (Tink sound), then fires on ~0.13 s of closed fist (Pop sound). Fingertips that Vision loses sight of count as curled. That's what makes fist detection robust when fingers occlude themselves.
+- **Gesture detection**: Apple's Vision framework (`VNDetectHumanHandPoseRequest`) tracks 21 hand joints from the FaceTime camera at ~15 fps. Gestures are deliberate by design: 2 s of steady open palm arms (Tink), 1 s of held fist grabs (Pop), and a drop is 1 s of fist then half a second of open hand. A moving wrist resets the timers, so waving or talking with your hands never triggers anything. Fingertips that Vision loses sight of count as curled, which keeps fist detection solid when fingers occlude themselves.
 - **Screenshot**: `/usr/sbin/screencapture` grabs the full desktop to `~/Pictures/Slingshot/`.
-- **Hold & catch**: a grab doesn't broadcast anything. The grabbing Mac keeps the file and tells peers "I'm holding". When another Mac's camera sees the release gesture (fist, then open hand) within 30 s, it claims the drop and only then does the file stream to it, via MultipeerConnectivity (the same local Wi-Fi / peer-to-peer transport AirDrop uses; auto-discover, auto-connect, 8 s retries). Received files land in `~/Downloads` as `from-<sender>-grab-<timestamp>.png` and open automatically.
+- **Hold & catch**: a grab doesn't broadcast anything. The grabbing Mac keeps the file and tells peers "I'm holding". When another Mac's camera sees the release gesture (fist for 1 s, then open hand) within 30 s, it claims the drop and only then does the file stream to it, via MultipeerConnectivity (the same local Wi-Fi / peer-to-peer transport AirDrop uses; auto-discover, auto-connect, 8 s retries). Received files land in `~/Downloads` as `from-<sender>-grab-<timestamp>.png` and open automatically.
 - **Feedback**: menu bar icon (✊… searching / ✊✓ connected), toast banners for connect/send/receive/errors, flash + fly-away animation on grab, zoom-up animation on receive.
 
 There is no sender or receiver role. Every copy of the app does both. Real AirDrop has no programmatic-send API, which is why the transfer layer is MultipeerConnectivity.
@@ -25,7 +25,7 @@ There is no sender or receiver role. Every copy of the app does both. Real AirDr
 4. Grant **Screen Recording** (System Settings → Privacy & Security → Screen & System Audio Recording → enable Slingshot), then quit and reopen the app. That permission only applies at launch.
 5. Look for the **✊ icon in the menu bar**. When a second Mac on the same Wi-Fi runs the app, it flips to ✊✓ within seconds.
 
-Then: palm at your camera, make a fist to grab. Walk over, open your fist at the other Mac to drop. 👋 → ✊ → 🚶 → 🫳 → 🎁
+Then: palm open and still for 2 s, fist for 1 s to grab. Walk over, fist for 1 s and open your hand at the other Mac to drop. 👋 → ✊ → 🚶 → 🫳 → 🎁
 
 ## Build from source
 
