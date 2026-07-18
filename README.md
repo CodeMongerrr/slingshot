@@ -13,7 +13,7 @@ https://github.com/Giri-Aayush/slingshot
 - **Hold & catch**: a grab doesn't broadcast anything. The grabbing Mac keeps the file and tells peers "I'm holding". When another Mac's camera sees the release gesture (fist for 1 s, then open hand) within 30 s, it claims the drop and only then does the file stream to it, via MultipeerConnectivity (the same local Wi-Fi / peer-to-peer transport AirDrop uses; auto-discover, auto-connect, 8 s retries). Received files land in `~/Downloads` as `from-<sender>-grab-<timestamp>.png` and open automatically.
 - **Feedback**: menu bar icon (✊… searching / ✊✓ connected), toast banners for connect/send/receive/errors, flash + fly-away animation on grab, zoom-up animation on receive.
 
-There is no sender or receiver role. Every copy of the app does both. Real AirDrop has no programmatic-send API, which is why the transfer layer is MultipeerConnectivity.
+There is no sender or receiver role. Every copy of the app does both, and it is not limited to two Macs: everyone on the same network meshes together automatically (up to 8 per session). A hold is announced to every connected Mac, the first one to see the catch gesture wins the file, and latecomers are told someone beat them to it. The menu bar shows the whole room: a live count on the icon, plus Connected and Nearby sections. Real AirDrop has no programmatic-send API, which is why the transfer layer is MultipeerConnectivity.
 
 ## Install (prebuilt)
 

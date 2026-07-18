@@ -412,6 +412,10 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     private var discovered: Set<MCPeerID> = []
     private var retryTimer: Timer?
 
+    var nearbyPeers: [MCPeerID] {
+        discovered.filter { !session.connectedPeers.contains($0) }.sorted { $0.displayName < $1.displayName }
+    }
+
     override init() {
         let host = Host.current().localizedName ?? "Mac"
         // Random suffix so two identically named MacBooks never collide.
@@ -529,6 +533,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer id: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         log("🔍 Found peer \(id.displayName)")
         discovered.insert(id)
+        DispatchQueue.main.async { statusUI?.refresh() }
         if shouldInvite(id) {
             browser.invitePeer(id, to: session, withContext: nil, timeout: 15)
         }
@@ -537,6 +542,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer id: MCPeerID) {
         log("👋 Lost sight of \(id.displayName)")
         discovered.remove(id)
+        DispatchQueue.main.async { statusUI?.refresh() }
     }
 
     // MARK: Advertiser
@@ -584,8 +590,14 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             }
         case "unhold":
             if remoteHolder == id { remoteHolder = nil }
+        case "late":
+            log("🐢 Too late. Someone else caught it first")
+            DispatchQueue.main.async { showToast("🐢 Too late. Someone else caught it first") }
         case "catch":
-            guard let url = heldFile else { return }
+            guard let url = heldFile else {
+                sendControl(["t": "late"], to: [id])
+                return
+            }
             heldFile = nil
             holdGeneration += 1
             sendControl(["t": "unhold"])  // tell everyone else the hold is gone
@@ -651,17 +663,26 @@ final class StatusUI: NSObject {
     }
 
     func refresh() {
-        let peers = link.session.connectedPeers
-        item.button?.title = peers.isEmpty ? "✊…" : "✊✓"
+        let connected = link.session.connectedPeers.sorted { $0.displayName < $1.displayName }
+        let nearby = link.nearbyPeers
+        item.button?.title = connected.isEmpty ? "✊…" : "✊ \(connected.count)"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v0.6", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v0.7", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
-        if peers.isEmpty {
+        if connected.isEmpty && nearby.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
-        } else {
-            for p in peers {
-                menu.addItem(withTitle: "🤝 \(cleanName(p.displayName))", action: nil, keyEquivalent: "")
+        }
+        if !connected.isEmpty {
+            menu.addItem(withTitle: "Connected (\(connected.count))", action: nil, keyEquivalent: "")
+            for p in connected {
+                menu.addItem(withTitle: "  🤝 \(cleanName(p.displayName))", action: nil, keyEquivalent: "")
+            }
+        }
+        if !nearby.isEmpty {
+            menu.addItem(withTitle: "Nearby, connecting…", action: nil, keyEquivalent: "")
+            for p in nearby {
+                menu.addItem(withTitle: "  🔍 \(cleanName(p.displayName))", action: nil, keyEquivalent: "")
             }
         }
         menu.addItem(.separator())
@@ -728,7 +749,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v0.6. Palm, then fist, and your screen flies to the nearest Mac")
+log("Slingshot v0.7. Palm, then fist, and your screen flies to the nearest Mac")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
