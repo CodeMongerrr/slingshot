@@ -205,7 +205,9 @@ func classify(_ obs: VNHumanHandPoseObservation) -> (pose: HandPose, debug: Stri
 
 final class GestureEngine {
     var onGrab: () -> Void = {}
-    var onRelease: () -> Void = {}   // fist seen, then hand opens: the "drop" gesture
+    var onRelease: () -> Void = {}       // fist seen, then hand opens: the "drop" gesture
+    var onReleasePrimed: () -> Void = {} // fist seen and steady: a drop may be coming
+    var grabAllowed: () -> Bool = { true }
     var debugLogging = true
 
     private var openFrames = 0
@@ -239,7 +241,11 @@ final class GestureEngine {
         case .fist:
             seqFist += 1
             seqOpen = 0
-            if seqFist >= 2 { releasePrimedAt = now }
+            if seqFist >= 2 {
+                let stale = releasePrimedAt.map { now.timeIntervalSince($0) > 2.5 } ?? true
+                if stale { onReleasePrimed() }
+                releasePrimedAt = now
+            }
         case .open:
             seqOpen += 1
             if seqOpen >= 2 {
@@ -267,6 +273,10 @@ final class GestureEngine {
                 reset()
                 return
             }
+            if !grabAllowed() {
+                reset()  // a hold or pending catch took over; stand down quietly
+                return
+            }
             switch pose {
             case .fist:
                 fistFrames += 1
@@ -283,7 +293,7 @@ final class GestureEngine {
                 break          // hand mid-transition; keep waiting
             }
         } else {
-            if pose == .open {
+            if pose == .open && grabAllowed() {
                 openFrames += 1
                 if openFrames >= framesToArm {
                     armedAt = Date()
@@ -386,6 +396,12 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     private var remoteHolder: MCPeerID?
     private let holdWindow: TimeInterval = 30
 
+    /// While true, this Mac should not start a grab: it is holding, mid-catch,
+    /// or just finished a catch (the hand that caught would re-trigger instantly).
+    var grabMutedUntil = Date.distantPast
+    var isHolding: Bool { heldFile != nil }
+    var hasRemoteHold: Bool { remoteHolder != nil }
+
     /// Grab: keep the screenshot "in the fist". Nothing is sent until a peer catches it.
     func hold(_ url: URL) {
         let peers = session.connectedPeers
@@ -415,6 +431,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     func catchGesture() {
         guard let holder = remoteHolder else { return }
         remoteHolder = nil
+        grabMutedUntil = Date().addingTimeInterval(5)
         log("🫳 Catch! Requesting the screenshot from \(holder.displayName)")
         DispatchQueue.main.async {
             play("Tink")
@@ -514,6 +531,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             guard let url = heldFile else { return }
             heldFile = nil
             holdGeneration += 1
+            sendControl(["t": "unhold"])  // tell everyone else the hold is gone
             log("🎯 \(id.displayName) caught it. Sending")
             deliver(url, to: id)
         default:
@@ -543,6 +561,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             dest = downloads.appendingPathComponent("\(base)-\(counter).\(ext)")
             counter += 1
         }
+        grabMutedUntil = Date().addingTimeInterval(5)
         do {
             try FileManager.default.copyItem(at: localURL, to: dest)
             log("🎁 Received \(name) from \(id.displayName) → \(dest.path)")
@@ -579,7 +598,7 @@ final class StatusUI: NSObject {
         item.button?.title = peers.isEmpty ? "✊…" : "✊✓"
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v0.4", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v0.5", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         if peers.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -652,7 +671,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v0.4. Palm, then fist, and your screen flies to the nearest Mac")
+log("Slingshot v0.5. Palm, then fist, and your screen flies to the nearest Mac")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -678,8 +697,21 @@ func startEverything() {
 
     link.start()
 
+    // A Mac never grabs while it is holding, has a catch pending, or just caught.
+    // Otherwise the catcher's own hand re-triggers a grab on the receiving Mac.
+    engine.grabAllowed = {
+        !link.isHolding && !link.hasRemoteHold && Date() >= link.grabMutedUntil
+    }
+
     engine.onRelease = {
         link.catchGesture()
+    }
+
+    engine.onReleasePrimed = {
+        if link.hasRemoteHold {
+            play("Tink")
+            log("👊 Fist seen. Open your hand to drop it here")
+        }
     }
 
     engine.onGrab = {
