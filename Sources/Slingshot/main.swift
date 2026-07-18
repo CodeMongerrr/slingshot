@@ -78,7 +78,7 @@ private func makeImageWindow(image: NSImage, frame: NSRect) -> NSWindow {
     return w
 }
 
-/// The screenshot appears large, then shrinks toward the bottom-right corner — "grabbed" off the screen.
+/// The screenshot appears large, then shrinks toward the bottom-right corner, like it was grabbed off the screen.
 func animateGrab(image: NSImage) {
     guard let screen = NSScreen.main else { return }
     let sf = screen.visibleFrame
@@ -234,7 +234,7 @@ final class GestureEngine {
         lastPose = pose
 
         // Fist→open "release" tracking, independent of the grab state machine
-        // (and of its cooldown — a release right after a grab must still register on the catching Mac).
+        // (and of its cooldown: a release right after a grab must still register on the catching Mac).
         switch pose {
         case .fist:
             seqFist += 1
@@ -258,12 +258,12 @@ final class GestureEngine {
         guard now >= cooldownUntil else { return }
         if !announcedReady {
             announcedReady = true
-            log("🔄 Ready — show your palm to grab again")
+            log("🔄 Ready. Show your palm to grab again")
         }
 
         if let armed = armedAt {
             if now.timeIntervalSince(armed) > armTimeout {
-                log("⌛️ Gesture timed out — show your palm again to re-arm")
+                log("⌛️ Gesture timed out. Show your palm again")
                 reset()
                 return
             }
@@ -288,7 +288,7 @@ final class GestureEngine {
                 if openFrames >= framesToArm {
                     armedAt = Date()
                     play("Tink")
-                    log("✋ Palm detected — close your fist to grab the screen")
+                    log("✋ Palm detected. Close your fist to grab the screen")
                 }
             } else {
                 openFrames = 0
@@ -390,24 +390,24 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
     func hold(_ url: URL) {
         let peers = session.connectedPeers
         guard !peers.isEmpty else {
-            log("📦 No peer connected — screenshot kept locally at \(url.path)")
-            DispatchQueue.main.async { showToast("📦 No Mac connected — saved to Pictures/Slingshot") }
+            log("📦 No peer connected. Screenshot saved locally at \(url.path)")
+            DispatchQueue.main.async { showToast("📦 No Mac connected. Saved to Pictures/Slingshot") }
             return
         }
         heldFile = url
         holdGeneration += 1
         let gen = holdGeneration
         sendControl(["t": "hold"])
-        log("✊ Holding \(url.lastPathComponent) — open your fist at the receiving Mac within \(Int(holdWindow)) s")
+        log("✊ Holding \(url.lastPathComponent). Open your fist at the receiving Mac within \(Int(holdWindow)) s")
         DispatchQueue.main.async {
-            showToast("✊ Holding screenshot — open your fist at the other Mac to drop it")
+            showToast("✊ Holding screenshot. Open your fist at the other Mac to drop it")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + holdWindow) { [weak self] in
             guard let self, self.holdGeneration == gen, self.heldFile != nil else { return }
             self.heldFile = nil
             self.sendControl(["t": "unhold"])
-            log("⌛️ Hold expired — screenshot kept locally")
-            showToast("⌛️ Hold expired — screenshot kept locally")
+            log("⌛️ Hold expired. Screenshot saved locally")
+            showToast("⌛️ Hold expired. Screenshot saved locally")
         }
     }
 
@@ -469,7 +469,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
 
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer id: MCPeerID,
                     withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        log("📨 Invitation from \(id.displayName) — accepting")
+        log("📨 Invitation from \(id.displayName), accepting")
         invitationHandler(true, session)
     }
 
@@ -480,7 +480,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
         case .connecting:
             log("…  Connecting to \(id.displayName)")
         case .connected:
-            log("🤝 Connected to \(id.displayName) — ready to beam")
+            log("🤝 Connected to \(id.displayName). Ready to beam")
             DispatchQueue.main.async {
                 play("Hero")
                 showToast("🤝 Connected to \(cleanName(id.displayName))")
@@ -500,10 +500,10 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
         switch type {
         case "hold":
             remoteHolder = id
-            log("🫴 \(id.displayName) is holding a screenshot — fist, then open your hand at this Mac to catch it")
+            log("🫴 \(id.displayName) is holding a screenshot. Fist, then open your hand at this Mac to catch it")
             DispatchQueue.main.async {
                 play("Tink")
-                showToast("🫴 \(cleanName(id.displayName)) is holding a screenshot — fist, then open, to catch it here")
+                showToast("🫴 \(cleanName(id.displayName)) is holding a screenshot. Fist, then open, to catch it here")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + holdWindow + 2) { [weak self] in
                 if self?.remoteHolder == id { self?.remoteHolder = nil }
@@ -514,7 +514,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             guard let url = heldFile else { return }
             heldFile = nil
             holdGeneration += 1
-            log("🎯 \(id.displayName) caught it — sending")
+            log("🎯 \(id.displayName) caught it. Sending")
             deliver(url, to: id)
         default:
             break
@@ -652,7 +652,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v0.4 — palm, then fist, and your screen flies to the nearest Mac")
+log("Slingshot v0.4. Palm, then fist, and your screen flies to the nearest Mac")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -671,7 +671,7 @@ func startEverything() {
 
     // Screen-recording permission: without it screencapture returns nothing useful.
     if !CGPreflightScreenCaptureAccess() {
-        log("⚠️ Screen Recording permission missing — requesting now. Grant it in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Slingshot.")
+        log("⚠️ Screen Recording permission missing. Requesting now. Grant it in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Slingshot.")
         showToast("⚠️ Grant Screen Recording in System Settings, then reopen Slingshot")
         CGRequestScreenCaptureAccess()
     }
@@ -695,8 +695,8 @@ func startEverything() {
             }
             link.hold(shot)
         } else {
-            log("❌ Screenshot failed — check Screen Recording permission")
-            DispatchQueue.main.async { showToast("❌ Screenshot failed — check Screen Recording permission") }
+            log("❌ Screenshot failed. Check Screen Recording permission")
+            DispatchQueue.main.async { showToast("❌ Screenshot failed. Check Screen Recording permission") }
         }
     }
 
