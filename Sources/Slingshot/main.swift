@@ -1960,6 +1960,10 @@ final class StatusUI: NSObject {
         clapItem.target = self
         clapItem.state = clapMuteEnabled ? .on : .off
         menu.addItem(clapItem)
+        let idleItem = NSMenuItem(title: "Quit after \(Int(idleQuitAfter)) idle seconds", action: #selector(toggleIdleQuit), keyEquivalent: "")
+        idleItem.target = self
+        idleItem.state = idleQuitEnabled ? .on : .off
+        menu.addItem(idleItem)
         menu.addItem(.separator())
         if connected.isEmpty && nearby.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -2028,6 +2032,18 @@ final class StatusUI: NSObject {
                 snapListener?.stop()
                 snapListener = nil
             }
+        }
+        refresh()
+    }
+
+    @objc private func toggleIdleQuit() {
+        idleQuitEnabled.toggle()
+        UserDefaults.standard.set(idleQuitEnabled, forKey: "idleQuit")
+        if idleQuitEnabled {
+            noteActivity()  // fresh grace period, not an instant quit
+            log("⏻ Auto-quit on. \(Int(idleQuitAfter)) idle seconds and Slingshot leaves")
+        } else {
+            log("⏻ Auto-quit off. Slingshot stays until told otherwise")
         }
         refresh()
     }
@@ -2120,7 +2136,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v1.8.3. Palm then fist to sling a screenshot; snap for a clipboard copy; clap to mute")
+log("Slingshot v1.8.3. Palm then fist to sling a screenshot; snap for a clipboard copy; clap to mute; three snaps to quit")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -2137,6 +2153,30 @@ var snapListener: SnapListener?
 var snapToClipboardEnabled = UserDefaults.standard.bool(forKey: "snapToClipboard")  // opt-in, persisted
 var clapMuteEnabled = UserDefaults.standard.bool(forKey: "clapMute")  // opt-in, persisted
 let muteQueue = DispatchQueue(label: "slingshot.mute")
+
+/// Quit entirely after this long with no hand in view, no sound trigger,
+/// and no transfer in flight. Three quick snaps quit on the spot.
+let idleQuitAfter: TimeInterval = 10
+let quitSnapCount = 3
+let quitSnapWindow: TimeInterval = 5
+var idleQuitEnabled: Bool = {
+    // Default on: Slingshot leaves when nobody is playing with it.
+    UserDefaults.standard.object(forKey: "idleQuit") == nil || UserDefaults.standard.bool(forKey: "idleQuit")
+}()
+var lastActivity = Date()          // main thread only
+var recentSnapFires: [Date] = []   // main thread only
+var idleQuitTimer: Timer?
+
+func noteActivity() { lastActivity = Date() }
+
+/// Log, wave from the notch, and exit. Main thread only.
+func quitSlingshot(_ reason: String) {
+    idleQuitTimer?.invalidate()
+    idleQuitTimer = nil
+    log("👋 \(reason). Slingshot signing off")
+    NotchIsland.shared.compact("power", NotchIsland.Palette.ash, "Bye", kind: .outcome)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { app.terminate(nil) }
+}
 var snapWakeEnabled: Bool = {
     // Default on: the camera sleeps until a snap wakes it.
     UserDefaults.standard.object(forKey: "snapWake") == nil || UserDefaults.standard.bool(forKey: "snapWake")
@@ -2189,6 +2229,13 @@ func startSnapListening() {
         listener.snapActionEnabled = { snapWakeEnabled || snapToClipboardEnabled }
         listener.clapActionEnabled = { clapMuteEnabled }
         listener.onSnap = {
+            noteActivity()
+            recentSnapFires.append(Date())
+            recentSnapFires.removeAll { Date().timeIntervalSince($0) > quitSnapWindow }
+            if recentSnapFires.count >= quitSnapCount {
+                quitSlingshot("\(quitSnapCount) snaps")
+                return
+            }
             if snapWakeEnabled, let cam = camera, !cam.isRunning {
                 wakeCamera("snap")
                 return
@@ -2209,6 +2256,7 @@ func startSnapListening() {
             }
         }
         listener.onClap = {
+            noteActivity()
             guard clapMuteEnabled else { return }
             // Serial queue: back-to-back claps must toggle in order, never race.
             muteQueue.async {
@@ -2269,6 +2317,18 @@ func startEverything() {
     }
 
     link.start()
+
+    // The exit clock: quits when both activity signals (sound triggers and a
+    // hand in frame) have gone quiet and no transfer or hold needs the app.
+    idleQuitTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+        guard idleQuitEnabled else { return }
+        guard !link.isHolding, !link.hasRemoteHold, !link.hasActiveTransfers else { return }
+        let now = Date()
+        let idle = min(now.timeIntervalSince(lastActivity), now.timeIntervalSince(frameStore.lastHand()))
+        if idle > idleQuitAfter {
+            quitSlingshot("\(Int(idleQuitAfter)) idle seconds")
+        }
+    }
 
     // A Mac never grabs while it is holding, has a catch pending, or just caught.
     // Otherwise the catcher's own hand re-triggers a grab on the receiving Mac.
