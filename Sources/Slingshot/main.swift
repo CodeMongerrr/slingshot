@@ -1796,7 +1796,7 @@ final class StatusUI: NSObject {
         item.button?.title = base + (currentMode == .normal ? " N" : " P")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v1.8.2", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v1.8.3", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "")
@@ -1964,7 +1964,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v1.8.2. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v1.8.3. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -2178,10 +2178,10 @@ func startEverything() {
         wakeCamera("always-on mode")
     }
 
-    // Doze off after 30 seconds without a hand in view and nothing pending.
+    // Doze off after 20 seconds without a hand in view and nothing pending.
     Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
         guard snapWakeEnabled, let cam = camera, cam.isRunning else { return }
-        if Date().timeIntervalSince(frameStore.lastHand()) > 30 {
+        if Date().timeIntervalSince(frameStore.lastHand()) > 20 {
             sleepCamera("idle")
         }
     }
