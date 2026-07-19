@@ -6,10 +6,14 @@ Inspired by Huawei's Mate 70 air-gesture file transfer demo, rebuilt for the App
 
 https://github.com/Giri-Aayush/slingshot
 
+## Demo
+
+A 30 second demo video is coming. Until then: snap, palm, fist, walk, fist, open hand. The screenshot crosses the room.
+
 ## How it works
 
 - **The notch is alive**: hover your mouse over it and a status tray peeks out (connected Macs, camera state, mode). Drag any file onto the notch and Slingshot holds it exactly like a grabbed screenshot: walk to another Mac, fist for a second, open your hand, and the file lands there.
-- **Snap to wake** (on by default): the camera sleeps until Apple's on-device sound classifier hears a finger snap. Snap, the notch pulses "Camera awake", and the hand gestures work as usual. It dozes back off a few seconds after a transfer completes, or after 20 seconds without a hand in view, and an incoming hold wakes it automatically so catching needs no snap. Turn it off in the menu bar for an always-on camera. If the microphone is denied, the camera falls back to always-on.
+- **Snap to wake** (on by default): the camera sleeps until Apple's on-device sound classifier hears a finger snap. Snap, an eye glyph blinks from the notch, and the hand gestures work as usual. It dozes back off a few seconds after a transfer completes, or after 20 seconds without a hand in view, and an incoming hold wakes it automatically so catching needs no snap. Turn it off in the menu bar for an always-on camera. If the microphone is denied, the camera falls back to always-on.
 - **Gesture detection**: Apple's Vision framework (`VNDetectHumanHandPoseRequest`) tracks 21 hand joints from the FaceTime camera at ~15 fps. Gestures are deliberate by design: 2 s of steady open palm arms (Tink), 1 s of held fist grabs (Pop), and a drop is 1 s of fist then half a second of open hand. A moving wrist resets the timers, so waving or talking with your hands never triggers anything. Fingertips that Vision loses sight of count as curled, which keeps fist detection solid when fingers occlude themselves.
 - **Screenshot**: `/usr/sbin/screencapture` grabs the full desktop to `~/Pictures/Slingshot/`.
 - **Snap to clipboard** (opt-in, off by default): Apple's on-device sound classifier listens for a finger snap and copies a full screenshot straight to the clipboard, ready for Cmd-V. Toggle it from the menu bar. Audio is analyzed locally and never leaves the Mac.
@@ -63,6 +67,12 @@ Everything the app does is narrated in `~/Library/Logs/Slingshot.log` (also reac
 - Grab the frontmost Finder selection / any file, not just screenshots
 - Proper notarized distribution
 - iPad support (same Vision + MultipeerConnectivity APIs)
+
+## Project
+
+- [Contributing](CONTRIBUTING.md), including build and test instructions
+- [Security policy](SECURITY.md)
+- [Privacy](PRIVACY.md): no server, no telemetry, nothing leaves the Mac except transfers
 
 ## License
 

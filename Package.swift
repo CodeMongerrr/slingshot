@@ -4,7 +4,12 @@ import PackageDescription
 let package = Package(
     name: "Slingshot",
     platforms: [.macOS(.v13)],
+    products: [
+        .library(name: "SlingshotCore", targets: ["SlingshotCore"])
+    ],
     targets: [
-        .executableTarget(name: "Slingshot", path: "Sources/Slingshot")
+        .target(name: "SlingshotCore", path: "Sources/SlingshotCore"),
+        .executableTarget(name: "Slingshot", dependencies: ["SlingshotCore"], path: "Sources/Slingshot"),
+        .executableTarget(name: "SlingshotTests", dependencies: ["SlingshotCore"], path: "Sources/SlingshotTests"),
     ]
 )

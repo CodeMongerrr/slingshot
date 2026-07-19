@@ -1,0 +1,23 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+      - name: Test
+        run: swift run -c release SlingshotTests
+      - name: Package
+        # CI has no signing identity yet; ships ad-hoc signed. When the
+        # Developer ID cert lands, add CODESIGN_IDENTITY plus notarytool
+        # (store credentials in repo secrets) and staple before zipping.
+        run: ./scripts/package.sh
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Slingshot.zip
+          generate_release_notes: true

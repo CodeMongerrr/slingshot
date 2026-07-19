@@ -1,0 +1,56 @@
+import AppKit
+
+// MARK: - Helpers
+
+let logFileURL = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Logs/Slingshot.log")
+let shotsDir = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Pictures/Slingshot", isDirectory: true)
+
+let logQueue = DispatchQueue(label: "slingshot.log")
+let logFormatter: DateFormatter = {
+    let df = DateFormatter()
+    df.dateFormat = "HH:mm:ss"
+    return df
+}()
+let logHandle: FileHandle? = {
+    let fm = FileManager.default
+    // Rotate at 5 MB, keeping one previous generation.
+    if let size = (try? fm.attributesOfItem(atPath: logFileURL.path))?[.size] as? Int, size > 5_000_000 {
+        let old = logFileURL.deletingPathExtension().appendingPathExtension("old.log")
+        try? fm.removeItem(at: old)
+        try? fm.moveItem(at: logFileURL, to: old)
+    }
+    if !fm.fileExists(atPath: logFileURL.path) {
+        fm.createFile(atPath: logFileURL.path, contents: nil)
+    }
+    let handle = try? FileHandle(forWritingTo: logFileURL)
+    handle?.seekToEndOfFile()
+    return handle
+}()
+
+func log(_ msg: String) {
+    let now = Date()
+    logQueue.async {
+        let line = "[\(logFormatter.string(from: now))] \(msg)\n"
+        print(line, terminator: "")
+        fflush(stdout)
+        if let data = line.data(using: .utf8) {
+            logHandle?.write(data)
+        }
+    }
+}
+
+func play(_ name: String) {
+    NSSound(named: NSSound.Name(name))?.play()
+}
+
+func cleanName(_ s: String) -> String {
+    s.components(separatedBy: "#").first ?? s
+}
+
+struct RuntimeError: Error, CustomStringConvertible {
+    let description: String
+    init(_ d: String) { description = d }
+}
+
