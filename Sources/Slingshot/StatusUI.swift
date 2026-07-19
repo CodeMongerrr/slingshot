@@ -1,4 +1,6 @@
 import AppKit
+import ServiceManagement
+import Sparkle
 
 // MARK: - Menu bar status item
 
@@ -19,7 +21,7 @@ final class StatusUI: NSObject {
         item.button?.title = base + (currentMode == .normal ? " N" : " P")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v1.10", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v2.0", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "")
@@ -63,6 +65,15 @@ final class StatusUI: NSObject {
         let folder = NSMenuItem(title: "Open Screenshots Folder", action: #selector(openFolder), keyEquivalent: "")
         folder.target = self
         menu.addItem(folder)
+        let updateItem = NSMenuItem(title: "Check for Updates…",
+                                    action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                                    keyEquivalent: "")
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
+        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        menu.addItem(loginItem)
         let trustItem = NSMenuItem(title: "Reset trusted Macs", action: #selector(resetTrust), keyEquivalent: "")
         trustItem.target = self
         menu.addItem(trustItem)
@@ -118,6 +129,21 @@ final class StatusUI: NSObject {
                 snapListener = nil
                 snapWakeOperational = false
             }
+        }
+        refresh()
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+                log("🚪 Start at Login off")
+            } else {
+                try SMAppService.mainApp.register()
+                log("🚪 Start at Login on")
+            }
+        } catch {
+            log("❌ Start at Login change failed: \(error)")
         }
         refresh()
     }

@@ -26,7 +26,7 @@ There is no sender or receiver role. Every copy of the app does both, and it is 
 
 ## Install (prebuilt)
 
-1. Download `Slingshot.zip` from [Releases](https://github.com/Giri-Aayush/slingshot/releases) and unzip.
+1. Download `Slingshot.zip` from [Releases](https://github.com/Giri-Aayush/slingshot/releases) and unzip. From v2.0 the app updates itself: signed updates arrive through Sparkle, and Check for Updates lives in the menu bar next to Start at Login.
 2. The app is signed with a development certificate, not notarized, so Gatekeeper will balk. Either:
    - run `xattr -dr com.apple.quarantine /path/to/Slingshot.app`, or
    - try to open it once, then System Settings → Privacy & Security → scroll to Security → **Open Anyway**.
@@ -64,8 +64,7 @@ Everything the app does is narrated in `~/Library/Logs/Slingshot.log` (also reac
 
 ## Roadmap
 
-- Grab the frontmost Finder selection / any file, not just screenshots
-- Proper notarized distribution
+- Notarized distribution (pipeline is in scripts/package.sh, waiting on a Developer ID certificate)
 - iPad support (same Vision + MultipeerConnectivity APIs)
 
 ## Project

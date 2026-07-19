@@ -5,7 +5,7 @@ import Vision
 
 // MARK: - Main
 
-log("Slingshot v1.10. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v2.0. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -261,6 +261,12 @@ func startEverything() {
     log("🙌 Ready. Snap to wake the camera, palm 2 seconds to arm, fist 1 second to grab.")
 
     startSnapListening()
+}
+
+_ = updaterController  // start Sparkle with the app
+
+OnboardingWindow.shared.showIfNeeded {
+    log("🎓 Onboarding done")
 }
 
 switch AVCaptureDevice.authorizationStatus(for: .video) {
