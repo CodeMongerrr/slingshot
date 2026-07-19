@@ -5,7 +5,7 @@ import Vision
 
 // MARK: - Main
 
-log("Slingshot v2.1. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v2.1. Palm then fist to sling a screenshot; snap for a clipboard copy; clap to sleep or mute")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -29,6 +29,33 @@ var snapWakeEnabled: Bool = {
     // Default on: the camera sleeps until a snap wakes it.
     UserDefaults.standard.object(forKey: "snapWake") == nil || UserDefaults.standard.bool(forKey: "snapWake")
 }()
+
+var clapMuteEnabled = UserDefaults.standard.bool(forKey: "clapMute")  // opt-in, persisted
+/// Serial queue for mute toggles: back-to-back claps must apply in order.
+let muteQueue = DispatchQueue(label: "slingshot.mute")
+var controlPanel: ControlPanel?
+
+/// Quit entirely after this long with no hand in view, no sound trigger,
+/// and no transfer in flight. Three quick snaps quit on the spot.
+let idleQuitAfter: TimeInterval = 10
+let quitSnapCount = 3
+let quitSnapWindow: TimeInterval = 5
+var idleQuitEnabled = UserDefaults.standard.bool(forKey: "idleQuit")    // opt-in, persisted
+var quitSnapsEnabled = UserDefaults.standard.bool(forKey: "quitSnaps")  // opt-in, persisted
+var lastActivity = Date()          // main thread only
+var recentSnapFires: [Date] = []   // main thread only
+var idleQuitTimer: Timer?
+
+func noteActivity() { lastActivity = Date() }
+
+/// Log, wave from the notch, and exit. Main thread only.
+func quitSlingshot(_ reason: String) {
+    idleQuitTimer?.invalidate()
+    idleQuitTimer = nil
+    log("👋 \(reason). Slingshot signing off")
+    NotchIsland.shared.compact("power", NotchIsland.Palette.ash, "Bye", kind: .outcome)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { app.terminate(nil) }
+}
 
 let cameraControlQueue = DispatchQueue(label: "slingshot.camera.control")
 
@@ -69,19 +96,106 @@ func scheduleWorkDoneSleep() {
     }
 }
 
-/// Bring up the snap listener if the user turned it on. Requests microphone access
-/// on first use; denial leaves the camera features untouched.
+// MARK: - Feature switches (shared by the menu bar and the control panel)
+
+func stopSoundListenerIfUnused() {
+    if !snapWakeEnabled && !snapToClipboardEnabled && !clapMuteEnabled {
+        snapListener?.stop()
+        snapListener = nil
+        snapWakeOperational = false
+    }
+}
+
+func refreshControls() {
+    statusUI?.refresh()
+    controlPanel?.refreshStatus()
+}
+
+func setSnapWake(_ on: Bool) {
+    snapWakeEnabled = on
+    UserDefaults.standard.set(on, forKey: "snapWake")
+    if on {
+        log("🫰 Snap-to-wake on. The camera sleeps when idle")
+        startSnapListening()
+        scheduleWorkDoneSleep()
+    } else {
+        log("👁️ Camera always on")
+        wakeCamera("always-on mode")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setSnapClipboard(_ on: Bool) {
+    snapToClipboardEnabled = on
+    UserDefaults.standard.set(on, forKey: "snapToClipboard")
+    if on {
+        log("🫰 Snap-to-clipboard on")
+        startSnapListening()
+    } else {
+        log("🔇 Snap-to-clipboard off")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setClapMute(_ on: Bool) {
+    clapMuteEnabled = on
+    UserDefaults.standard.set(on, forKey: "clapMute")
+    if on {
+        log("👏 Clap-to-mute on")
+        startSnapListening()
+    } else {
+        log("🔇 Clap-to-mute off")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setIdleQuit(_ on: Bool) {
+    idleQuitEnabled = on
+    UserDefaults.standard.set(on, forKey: "idleQuit")
+    if on {
+        noteActivity()  // fresh grace period, not an instant quit
+        log("⏻ Auto-quit on. \(Int(idleQuitAfter)) idle seconds and Slingshot leaves")
+    } else {
+        log("⏻ Auto-quit off. Slingshot stays until told otherwise")
+    }
+    refreshControls()
+}
+
+func setQuitSnaps(_ on: Bool) {
+    quitSnapsEnabled = on
+    UserDefaults.standard.set(on, forKey: "quitSnaps")
+    log(on ? "🫰 Three quick snaps quit Slingshot" : "🫰 Triple-snap quit off")
+    refreshControls()
+}
+
+/// Bring up the snap/clap listener if any sound feature is on. Requests
+/// microphone access on first use; denial leaves the camera features untouched.
 func startSnapListening() {
-    guard snapWakeEnabled || snapToClipboardEnabled, snapListener == nil else { return }
+    guard snapWakeEnabled || snapToClipboardEnabled || clapMuteEnabled, snapListener == nil else { return }
 
     let begin = {
+        // Re-check: the mic prompt takes arbitrarily long, and the user may have
+        // toggled features (or another call may have begun a listener) meanwhile.
+        guard snapListener == nil, snapWakeEnabled || snapToClipboardEnabled || clapMuteEnabled else { return }
         let listener = SnapListener()
-        listener.onClap = {
-            guard let cam = camera, cam.isRunning else { return }
-            log("👏 Clap. Putting the camera to sleep")
-            sleepCamera("clap")
+        listener.snapActionEnabled = { snapWakeEnabled || snapToClipboardEnabled }
+        // A clap always has a consumer: sleep the camera (default) or toggle mute.
+        listener.clapActionEnabled = { true }
+        listener.onLevels = { snap, clap in
+            DispatchQueue.main.async { controlPanel?.levels(snap: snap, clap: clap) }
         }
         listener.onSnap = {
+            noteActivity()
+            controlPanel?.flash(.snap)
+            recentSnapFires.append(Date())
+            recentSnapFires.removeAll { Date().timeIntervalSince($0) > quitSnapWindow }
+            if quitSnapsEnabled, recentSnapFires.count >= quitSnapCount {
+                quitSlingshot("\(quitSnapCount) snaps")
+                return
+            }
             if snapWakeEnabled, let cam = camera, !cam.isRunning {
                 wakeCamera("snap")
                 return
@@ -98,6 +212,34 @@ func startSnapListening() {
                     } else {
                         NotchIsland.shared.compact("exclamationmark.triangle.fill", NotchIsland.Palette.coral, "Failed", kind: .outcome)
                     }
+                }
+            }
+        }
+        listener.onClap = {
+            noteActivity()
+            controlPanel?.flash(.clap)
+            // Default: the mirror of snap-to-wake — a clap puts the camera to
+            // sleep. Opt-in, the clap toggles the Mac's output mute instead.
+            guard clapMuteEnabled else {
+                guard let cam = camera, cam.isRunning else { return }
+                log("👏 Clap. Putting the camera to sleep")
+                sleepCamera("clap")
+                return
+            }
+            muteQueue.async {
+                guard let nowMuted = toggleSystemOutputMute() else {
+                    log("❌ Clap heard, but the output device refused the mute toggle")
+                    DispatchQueue.main.async {
+                        NotchIsland.shared.compact("exclamationmark.triangle.fill", NotchIsland.Palette.coral, "Mute failed", kind: .outcome)
+                    }
+                    return
+                }
+                log(nowMuted ? "👏 Clap! System sound muted" : "👏 Clap! System sound back on")
+                DispatchQueue.main.async {
+                    if !nowMuted { play("Pop") }  // a mute confirmation would be inaudible
+                    NotchIsland.shared.compact(nowMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                                               nowMuted ? NotchIsland.Palette.ash : NotchIsland.Palette.mint,
+                                               nowMuted ? "Muted" : "Sound on", kind: .outcome)
                 }
             }
         }
@@ -248,6 +390,18 @@ func startEverything() {
         }
     }
 
+    // The exit clock: quits when both activity signals (sound triggers and a
+    // hand in frame) have gone quiet and no transfer or hold needs the app.
+    idleQuitTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+        guard idleQuitEnabled else { return }
+        guard !link.isHolding, !link.hasRemoteHold, !link.hasActiveTransfers else { return }
+        let now = Date()
+        let idle = min(now.timeIntervalSince(lastActivity), now.timeIntervalSince(frameStore.lastHand()))
+        if idle > idleQuitAfter {
+            quitSlingshot("\(Int(idleQuitAfter)) idle seconds")
+        }
+    }
+
     NotchIsland.shared.statusProvider = {
         let peers = link.session.connectedPeers
         let title = peers.isEmpty ? "No Macs connected" : "\(peers.count) Mac\(peers.count == 1 ? "" : "s") connected"
@@ -273,6 +427,11 @@ _ = updaterController  // start Sparkle with the app
 OnboardingWindow.shared.showIfNeeded {
     log("🎓 Onboarding done")
 }
+
+// The control panel exists from the first moment, permission prompts included,
+// so there is always a place that shows WHY something is not happening.
+controlPanel = ControlPanel()
+controlPanel?.show()
 
 switch AVCaptureDevice.authorizationStatus(for: .video) {
 case .authorized:

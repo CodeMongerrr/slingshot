@@ -45,6 +45,21 @@ final class StatusUI: NSObject {
         snapItem.target = self
         snapItem.state = snapToClipboardEnabled ? .on : .off
         menu.addItem(snapItem)
+        let clapItem = NSMenuItem(title: "Clap to mute or unmute the Mac", action: #selector(toggleClap), keyEquivalent: "")
+        clapItem.target = self
+        clapItem.state = clapMuteEnabled ? .on : .off
+        menu.addItem(clapItem)
+        let idleItem = NSMenuItem(title: "Quit after \(Int(idleQuitAfter)) idle seconds", action: #selector(toggleIdleQuit), keyEquivalent: "")
+        idleItem.target = self
+        idleItem.state = idleQuitEnabled ? .on : .off
+        menu.addItem(idleItem)
+        let quitSnapsItem = NSMenuItem(title: "Three quick snaps quit Slingshot", action: #selector(toggleQuitSnaps), keyEquivalent: "")
+        quitSnapsItem.target = self
+        quitSnapsItem.state = quitSnapsEnabled ? .on : .off
+        menu.addItem(quitSnapsItem)
+        let panelItem = NSMenuItem(title: "Show Control Panel", action: #selector(showPanel), keyEquivalent: "")
+        panelItem.target = self
+        menu.addItem(panelItem)
         menu.addItem(.separator())
         if connected.isEmpty && nearby.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -100,41 +115,12 @@ final class StatusUI: NSObject {
         refresh()
     }
 
-    @objc private func toggleSnap() {
-        snapToClipboardEnabled.toggle()
-        UserDefaults.standard.set(snapToClipboardEnabled, forKey: "snapToClipboard")
-        if snapToClipboardEnabled {
-            log("🫰 Snap-to-clipboard on")
-            startSnapListening()
-        } else {
-            log("🔇 Snap-to-clipboard off")
-            if !snapWakeEnabled {
-                snapListener?.stop()
-                snapListener = nil
-                snapWakeOperational = false
-            }
-        }
-        refresh()
-    }
-
-    @objc private func toggleSnapWake() {
-        snapWakeEnabled.toggle()
-        UserDefaults.standard.set(snapWakeEnabled, forKey: "snapWake")
-        if snapWakeEnabled {
-            log("🫰 Snap-to-wake on. The camera sleeps when idle")
-            startSnapListening()
-            scheduleWorkDoneSleep()
-        } else {
-            log("👁️ Camera always on")
-            wakeCamera("always-on mode")
-            if !snapToClipboardEnabled {
-                snapListener?.stop()
-                snapListener = nil
-                snapWakeOperational = false
-            }
-        }
-        refresh()
-    }
+    @objc private func toggleSnap() { setSnapClipboard(!snapToClipboardEnabled) }
+    @objc private func toggleSnapWake() { setSnapWake(!snapWakeEnabled) }
+    @objc private func toggleClap() { setClapMute(!clapMuteEnabled) }
+    @objc private func toggleIdleQuit() { setIdleQuit(!idleQuitEnabled) }
+    @objc private func toggleQuitSnaps() { setQuitSnaps(!quitSnapsEnabled) }
+    @objc private func showPanel() { controlPanel?.show() }
 
     @objc private func toggleLogin() {
         do {
