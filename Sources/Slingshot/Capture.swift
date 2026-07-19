@@ -54,6 +54,7 @@ func copyScreenshotToClipboard() -> Bool {
 /// All analysis is local; no audio leaves the Mac. Debounced so one snap fires once.
 final class SnapListener: NSObject, SNResultsObserving {
     var onSnap: () -> Void = {}
+    var onClap: () -> Void = {}
     var confidenceThreshold: Double = 0.5
     var debounce: TimeInterval = 1.2
 
@@ -88,7 +89,7 @@ final class SnapListener: NSObject, SNResultsObserving {
         audio.prepare()
         try audio.start()
         let action = snapToClipboardEnabled ? "copies a screenshot to the clipboard" : "wakes the camera"
-        log("🫰 Listening for finger snaps. A snap \(action)")
+        log("🫰 Listening. A snap \(action); a clap puts the camera to sleep")
     }
 
     func stop() {
@@ -100,13 +101,19 @@ final class SnapListener: NSObject, SNResultsObserving {
     }
 
     func request(_ request: SNRequest, didProduce result: SNResult) {
-        guard let result = result as? SNClassificationResult,
-              let snap = result.classification(forIdentifier: "finger_snapping"),
-              snap.confidence >= confidenceThreshold else { return }
+        guard let result = result as? SNClassificationResult else { return }
+        let snap = result.classification(forIdentifier: "finger_snapping")?.confidence ?? 0
+        let clap = result.classification(forIdentifier: "clapping")?.confidence ?? 0
+        guard max(snap, clap) >= confidenceThreshold else { return }
         let now = Date()
+        // One debounce for both sounds, so a snap's tail can never read as a clap.
         guard now.timeIntervalSince(lastFire) >= debounce else { return }
         lastFire = now
-        DispatchQueue.main.async { [weak self] in self?.onSnap() }
+        if snap >= clap {
+            DispatchQueue.main.async { [weak self] in self?.onSnap() }
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.onClap() }
+        }
     }
 
     func request(_ request: SNRequest, didFailWithError error: Error) {
