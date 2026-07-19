@@ -1,5 +1,7 @@
 .build/
 .swiftpm/
+.agents/
+skills-lock.json
 Slingshot.app/
 Slingshot.zip
 *.png
