@@ -357,8 +357,8 @@ final class NotchIsland {
     /// A file was dropped on the notch. Set by the app layer.
     var onDropFile: (URL) -> Void = { _ in }
 
-    private let trayBand: CGFloat = 72
-    private let trayWidth: CGFloat = 360
+    private let trayBand: CGFloat = 80
+    private let trayWidth: CGFloat = 380
     private let canvasWidth: CGFloat = 800
     private let canvasHeight: CGFloat = 140
     private let topFlare: CGFloat = 8
@@ -570,7 +570,7 @@ final class NotchIsland {
 
     /// Radius scales with height: 12pt compact, 18pt tray.
     private func bottomRadius(forHeight h: CGFloat) -> CGFloat {
-        h > notchHeight + 8 ? 18 : 12
+        h > notchHeight + 8 ? 20 : 12
     }
 
     private func slabPath(centerX: CGFloat, width: CGFloat, height: CGFloat) -> CGPath {
@@ -821,8 +821,8 @@ final class NotchIsland {
 
         let h = max(notchHeight, 26)
         let wordW = word.isEmpty ? 0 : width(of: word, font: wingLabel.font ?? NSFont.systemFont(ofSize: 11))
-        let leftWing: CGFloat = symbol != nil ? 14 + 18 + 12 : 12
-        let rightWing: CGFloat = word.isEmpty ? leftWing : 14 + wordW + 16
+        let leftWing: CGFloat = symbol != nil ? 16 + 18 + 14 : 14
+        let rightWing: CGFloat = word.isEmpty ? leftWing : 16 + wordW + 18
         let w = notchWidth + leftWing + rightWing
         let centerX = canvasWidth / 2 + (rightWing - leftWing) / 2
 
@@ -832,7 +832,7 @@ final class NotchIsland {
         if let symbol {
             wingIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             wingIcon.contentTintColor = tint
-            wingIcon.frame = NSRect(x: 14, y: (h - 18) / 2, width: 18, height: 18)
+            wingIcon.frame = NSRect(x: 16, y: (h - 18) / 2, width: 18, height: 18)
             if pulsing {
                 wingIcon.wantsLayer = true
                 let pulse = CABasicAnimation(keyPath: "opacity")
@@ -848,7 +848,7 @@ final class NotchIsland {
         wingLabel.isHidden = word.isEmpty
         wingLabel.stringValue = word
         wingLabel.textColor = tint
-        wingLabel.frame = NSRect(x: w - wordW - 16, y: (h - 14) / 2, width: wordW, height: 14)
+        wingLabel.frame = NSRect(x: w - wordW - 18, y: (h - 14) / 2, width: wordW, height: 14)
 
         morph(to: slabPath(centerX: centerX, width: w, height: h), spring: true)
         NSAnimationContext.runAnimationGroup { ctx in
@@ -869,13 +869,13 @@ final class NotchIsland {
         let h = notchHeight + trayBand
 
         trayView.frame = NSRect(x: (canvasWidth - w) / 2, y: slabTop - h, width: w, height: trayBand)
-        var x: CGFloat = 24
+        var x: CGFloat = 28
         trayThumb.isHidden = image == nil
         trayWell.isHidden = !(image == nil && symbol != nil)
         if let image {
             trayThumb.layer?.contents = image
             trayThumb.frame = NSRect(x: x, y: (trayBand - 35) / 2, width: 56, height: 35)
-            x += 56 + 16
+            x += 56 + 18
         } else if let symbol {
             trayWell.frame = NSRect(x: x, y: (trayBand - 32) / 2, width: 32, height: 32)
             trayWellIcon.frame = trayWell.bounds
@@ -886,19 +886,19 @@ final class NotchIsland {
             trayWell.layer?.shadowRadius = 8
             trayWell.layer?.shadowOpacity = 0.5
             trayWell.layer?.shadowOffset = .zero
-            x += 32 + 16
+            x += 32 + 18
         }
-        let ringSpace: CGFloat = hasRing ? 24 + 20 : 0
-        let textWidth = w - x - 24 - ringSpace
+        let ringSpace: CGFloat = hasRing ? 24 + 24 : 0
+        let textWidth = w - x - 28 - ringSpace
         trayTitle.stringValue = title
-        trayTitle.frame = NSRect(x: x, y: trayBand / 2 + 4, width: textWidth, height: 17)
+        trayTitle.frame = NSRect(x: x, y: trayBand / 2 + 5, width: textWidth, height: 17)
         traySub.stringValue = subtitle
-        traySub.frame = NSRect(x: x, y: trayBand / 2 - 18, width: textWidth, height: 14)
+        traySub.frame = NSRect(x: x, y: trayBand / 2 - 20, width: textWidth, height: 14)
 
         ringView.isHidden = !hasRing
         stopRingTimer()
         if let progress {
-            ringView.frame = NSRect(x: w - 24 - 20, y: (trayBand - 24) / 2, width: 24, height: 24)
+            ringView.frame = NSRect(x: w - 24 - 24, y: (trayBand - 24) / 2, width: 24, height: 24)
             ringArc.strokeColor = tint.cgColor
             ringArc.removeAllAnimations()
             ringArc.strokeEnd = CGFloat(progress.fractionCompleted)
@@ -912,7 +912,7 @@ final class NotchIsland {
                 }
             }
         } else if let deadline {
-            ringView.frame = NSRect(x: w - 24 - 20, y: (trayBand - 24) / 2, width: 24, height: 24)
+            ringView.frame = NSRect(x: w - 24 - 24, y: (trayBand - 24) / 2, width: 24, height: 24)
             ringTint = tint
             ringDeadline = deadline
             ringArc.strokeColor = tint.cgColor
@@ -1796,7 +1796,7 @@ final class StatusUI: NSObject {
         item.button?.title = base + (currentMode == .normal ? " N" : " P")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v1.8.1", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v1.8.2", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "")
@@ -1964,7 +1964,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v1.8.1. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v1.8.2. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
