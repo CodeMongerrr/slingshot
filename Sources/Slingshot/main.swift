@@ -1390,15 +1390,13 @@ private func coreAudioToggleMute() -> Bool? {
 final class SnapListener: NSObject, SNResultsObserving {
     var onSnap: () -> Void = {}
     var onClap: () -> Void = {}
+    /// Every classification window's (snap, clap) confidences, for live meters.
+    var onLevels: (Double, Double) -> Void = { _, _ in }
     /// Whether each action currently has a consumer. Only enabled actions compete
     /// for a sound window, so a class nobody listens to can never win the window
     /// and burn the shared debounce for the one that would have acted.
     var snapActionEnabled: () -> Bool = { true }
     var clapActionEnabled: () -> Bool = { true }
-    var confidenceThreshold: Double = 0.5
-    /// Claps get a lower bar: a single real-room clap scores well under a crisp
-    /// close-mic snap, and mute toggling is cheap to undo if it misfires.
-    var clapConfidenceThreshold: Double = 0.35
     var debounce: TimeInterval = 1.2
     var debugLogging = true
 
@@ -1418,13 +1416,20 @@ final class SnapListener: NSObject, SNResultsObserving {
             let err = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                                            kAudioUnitScope_Global, 0, &device,
                                            UInt32(MemoryLayout<AudioDeviceID>.size))
-            if err == noErr {
+            var applied = AudioDeviceID(0)
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global, 0, &applied, &size)
+            if err == noErr, applied == builtIn {
                 log("🎙️ Listening on the built-in microphone")
             } else {
                 log("⚠️ Could not pin the built-in microphone (err \(err)). Using the system input")
             }
         }
-        let format = input.outputFormat(forBus: 0)
+        // The tap format must be the node's HARDWARE format: after a device
+        // switch the client-side outputFormat can still describe the old
+        // device, and a mismatched tap format is an uncatchable NSException.
+        let format = input.inputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw RuntimeError("Microphone input unavailable")
         }
@@ -1469,10 +1474,11 @@ final class SnapListener: NSObject, SNResultsObserving {
         // Room acoustics smear a single clap across "clapping" and "applause".
         let clapConfidence = max(result.classification(forIdentifier: "clapping")?.confidence ?? 0,
                                  result.classification(forIdentifier: "applause")?.confidence ?? 0)
+        onLevels(snapConfidence, clapConfidence)
         if debugLogging, max(snapConfidence, clapConfidence) >= 0.1 {
             log(String(format: "   · sound → snap %.2f clap %.2f", snapConfidence, clapConfidence))
         }
-        let snapEligible = snapActionEnabled() && snapConfidence >= confidenceThreshold
+        let snapEligible = snapActionEnabled() && snapConfidence >= snapConfidenceThreshold
         let clapEligible = clapActionEnabled() && clapConfidence >= clapConfidenceThreshold
         guard snapEligible || clapEligible else { return }
         let isSnap = snapEligible && (!clapEligible || snapConfidence >= clapConfidence)
@@ -1964,6 +1970,13 @@ final class StatusUI: NSObject {
         idleItem.target = self
         idleItem.state = idleQuitEnabled ? .on : .off
         menu.addItem(idleItem)
+        let quitSnapsItem = NSMenuItem(title: "Three quick snaps quit Slingshot", action: #selector(toggleQuitSnaps), keyEquivalent: "")
+        quitSnapsItem.target = self
+        quitSnapsItem.state = quitSnapsEnabled ? .on : .off
+        menu.addItem(quitSnapsItem)
+        let panelItem = NSMenuItem(title: "Show Control Panel", action: #selector(showPanel), keyEquivalent: "")
+        panelItem.target = self
+        menu.addItem(panelItem)
         menu.addItem(.separator())
         if connected.isEmpty && nearby.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -2004,67 +2017,12 @@ final class StatusUI: NSObject {
         refresh()
     }
 
-    @objc private func toggleSnap() {
-        snapToClipboardEnabled.toggle()
-        UserDefaults.standard.set(snapToClipboardEnabled, forKey: "snapToClipboard")
-        if snapToClipboardEnabled {
-            log("🫰 Snap-to-clipboard on")
-            startSnapListening()
-        } else {
-            log("🔇 Snap-to-clipboard off")
-            if !snapWakeEnabled && !clapMuteEnabled {
-                snapListener?.stop()
-                snapListener = nil
-            }
-        }
-        refresh()
-    }
-
-    @objc private func toggleClap() {
-        clapMuteEnabled.toggle()
-        UserDefaults.standard.set(clapMuteEnabled, forKey: "clapMute")
-        if clapMuteEnabled {
-            log("👏 Clap-to-mute on")
-            startSnapListening()
-        } else {
-            log("🔇 Clap-to-mute off")
-            if !snapWakeEnabled && !snapToClipboardEnabled {
-                snapListener?.stop()
-                snapListener = nil
-            }
-        }
-        refresh()
-    }
-
-    @objc private func toggleIdleQuit() {
-        idleQuitEnabled.toggle()
-        UserDefaults.standard.set(idleQuitEnabled, forKey: "idleQuit")
-        if idleQuitEnabled {
-            noteActivity()  // fresh grace period, not an instant quit
-            log("⏻ Auto-quit on. \(Int(idleQuitAfter)) idle seconds and Slingshot leaves")
-        } else {
-            log("⏻ Auto-quit off. Slingshot stays until told otherwise")
-        }
-        refresh()
-    }
-
-    @objc private func toggleSnapWake() {
-        snapWakeEnabled.toggle()
-        UserDefaults.standard.set(snapWakeEnabled, forKey: "snapWake")
-        if snapWakeEnabled {
-            log("🫰 Snap-to-wake on. The camera sleeps when idle")
-            startSnapListening()
-            scheduleWorkDoneSleep()
-        } else {
-            log("👁️ Camera always on")
-            wakeCamera("always-on mode")
-            if !snapToClipboardEnabled && !clapMuteEnabled {
-                snapListener?.stop()
-                snapListener = nil
-            }
-        }
-        refresh()
-    }
+    @objc private func toggleSnap() { setSnapClipboard(!snapToClipboardEnabled) }
+    @objc private func toggleClap() { setClapMute(!clapMuteEnabled) }
+    @objc private func toggleIdleQuit() { setIdleQuit(!idleQuitEnabled) }
+    @objc private func toggleSnapWake() { setSnapWake(!snapWakeEnabled) }
+    @objc private func toggleQuitSnaps() { setQuitSnaps(!quitSnapsEnabled) }
+    @objc private func showPanel() { controlPanel?.show() }
 
     @objc private func openFolder() {
         try? FileManager.default.createDirectory(at: shotsDir, withIntermediateDirectories: true)
@@ -2074,6 +2032,191 @@ final class StatusUI: NSObject {
     @objc private func openLog() {
         NSWorkspace.shared.open(logFileURL)
     }
+}
+
+// MARK: - Control panel
+
+/// A round lamp with a live confidence meter. Glows dimly with the level and
+/// flashes bright when its sound is registered.
+final class LampView: NSView {
+    private let bulb = NSView()
+    private let meterFill = NSView()
+    private let tint: NSColor
+    private var flashUntil = Date.distantPast
+
+    init(emoji: String, title: String, tint: NSColor) {
+        self.tint = tint
+        super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 130))
+        wantsLayer = true
+
+        bulb.frame = NSRect(x: 39, y: 46, width: 72, height: 72)
+        bulb.wantsLayer = true
+        bulb.layer?.cornerRadius = 36
+        bulb.layer?.backgroundColor = tint.withAlphaComponent(0.12).cgColor
+        addSubview(bulb)
+
+        let face = NSTextField(labelWithString: emoji)
+        face.font = .systemFont(ofSize: 34)
+        face.alignment = .center
+        face.frame = NSRect(x: 0, y: 60, width: 150, height: 44)
+        addSubview(face)
+
+        let name = NSTextField(labelWithString: title)
+        name.alignment = .center
+        name.font = .systemFont(ofSize: 12, weight: .semibold)
+        name.textColor = .secondaryLabelColor
+        name.frame = NSRect(x: 0, y: 24, width: 150, height: 16)
+        addSubview(name)
+
+        let track = NSView(frame: NSRect(x: 20, y: 12, width: 110, height: 6))
+        track.wantsLayer = true
+        track.layer?.cornerRadius = 3
+        track.layer?.backgroundColor = NSColor.tertiaryLabelColor.withAlphaComponent(0.25).cgColor
+        addSubview(track)
+        meterFill.frame = NSRect(x: 0, y: 0, width: 0, height: 6)
+        meterFill.wantsLayer = true
+        meterFill.layer?.cornerRadius = 3
+        meterFill.layer?.backgroundColor = tint.cgColor
+        track.addSubview(meterFill)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func level(_ v: Double) {
+        let clamped = CGFloat(max(0, min(1, v)))
+        meterFill.frame.size.width = clamped * 110
+        if Date() >= flashUntil {
+            bulb.layer?.backgroundColor = tint.withAlphaComponent(0.12 + 0.4 * clamped).cgColor
+        }
+    }
+
+    func flash() {
+        flashUntil = Date().addingTimeInterval(0.8)
+        bulb.layer?.backgroundColor = tint.cgColor
+        bulb.layer?.shadowColor = tint.cgColor
+        bulb.layer?.shadowOffset = .zero
+        bulb.layer?.shadowRadius = 18
+        bulb.layer?.shadowOpacity = 0.9
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, Date() >= self.flashUntil else { return }
+            self.bulb.layer?.backgroundColor = self.tint.withAlphaComponent(0.12).cgColor
+            self.bulb.layer?.shadowOpacity = 0
+        }
+    }
+}
+
+/// Local-only control window: a toggle for every feature and two lamps that
+/// glow the moment the live recorder registers a snap or a clap. Main thread.
+final class ControlPanel: NSObject {
+    enum Lamp { case snap, clap }
+
+    private let panel: NSPanel
+    private let snapLamp = LampView(emoji: "🫰", title: "SNAP",
+                                    tint: NSColor(calibratedRed: 0.35, green: 0.85, blue: 1.00, alpha: 1))
+    private let clapLamp = LampView(emoji: "👏", title: "CLAP",
+                                    tint: NSColor(calibratedRed: 0.30, green: 0.90, blue: 0.55, alpha: 1))
+    private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private var boxes: [(box: NSButton, isOn: () -> Bool)] = []
+    private var refreshTimer: Timer?
+    private var lastSnapLevel = 0.0
+    private var lastClapLevel = 0.0
+
+    override init() {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 384),
+                        styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        super.init()
+        panel.title = "Slingshot Control"
+        panel.level = .floating
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+
+        let content = panel.contentView!
+        snapLamp.setFrameOrigin(NSPoint(x: 20, y: 234))
+        clapLamp.setFrameOrigin(NSPoint(x: 210, y: 234))
+        content.addSubview(snapLamp)
+        content.addSubview(clapLamp)
+
+        let toggleSpecs: [(String, () -> Bool, Selector)] = [
+            ("Snap wakes the camera", { snapWakeEnabled }, #selector(hitSnapWake(_:))),
+            ("Snap copies a screenshot to the clipboard", { snapToClipboardEnabled }, #selector(hitSnapClip(_:))),
+            ("Clap mutes or unmutes the Mac", { clapMuteEnabled }, #selector(hitClapMute(_:))),
+            ("Quit after \(Int(idleQuitAfter)) idle seconds", { idleQuitEnabled }, #selector(hitIdleQuit(_:))),
+            ("Three quick snaps quit Slingshot", { quitSnapsEnabled }, #selector(hitQuitSnaps(_:))),
+        ]
+        var y: CGFloat = 202
+        for (title, isOn, action) in toggleSpecs {
+            let box = NSButton(checkboxWithTitle: title, target: self, action: action)
+            box.frame = NSRect(x: 24, y: y, width: 332, height: 20)
+            box.state = isOn() ? .on : .off
+            content.addSubview(box)
+            boxes.append((box, isOn))
+            y -= 26
+        }
+
+        statusLabel.frame = NSRect(x: 24, y: 12, width: 332, height: 62)
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        content.addSubview(statusLabel)
+
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshStatus()
+        }
+        refreshStatus()
+    }
+
+    func show() {
+        if panel.frame.origin == .zero { panel.center() }
+        panel.orderFront(nil)
+    }
+
+    /// Live classifier levels: drive the meters, and flash on each new crossing
+    /// of a class's confidence bar — even when that feature's action is off.
+    func levels(snap: Double, clap: Double) {
+        snapLamp.level(snap)
+        clapLamp.level(clap)
+        if snap >= snapConfidenceThreshold, lastSnapLevel < snapConfidenceThreshold { snapLamp.flash() }
+        if clap >= clapConfidenceThreshold, lastClapLevel < clapConfidenceThreshold { clapLamp.flash() }
+        lastSnapLevel = snap
+        lastClapLevel = clap
+    }
+
+    func flash(_ lamp: Lamp) {
+        (lamp == .snap ? snapLamp : clapLamp).flash()
+    }
+
+    func refreshStatus() {
+        for entry in boxes { entry.box.state = entry.isOn() ? .on : .off }
+        var lines: [String] = []
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            lines.append((camera?.isRunning ?? false) ? "🎥 Camera awake" : "😴 Camera asleep — snap to wake")
+        case .notDetermined:
+            lines.append("⏳ Camera permission not answered yet")
+        default:
+            lines.append("⛔️ Camera denied — System Settings → Privacy & Security → Camera")
+        }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            lines.append(snapListener != nil ? "🎙️ Mic listening (built-in)" : "🔇 Mic idle — sound features are off")
+        case .notDetermined:
+            lines.append("⏳ Microphone permission not answered yet")
+        default:
+            lines.append("⛔️ Microphone denied — no snaps, no claps")
+        }
+        if !CGPreflightScreenCaptureAccess() {
+            lines.append("⛔️ Screen Recording missing — grant it, then relaunch")
+        }
+        let peers = link.session.connectedPeers.count
+        lines.append(peers == 0 ? "📡 No Macs connected" : "🤝 \(peers) Mac(s) connected")
+        statusLabel.stringValue = lines.joined(separator: "\n")
+    }
+
+    @objc private func hitSnapWake(_ sender: NSButton) { setSnapWake(sender.state == .on) }
+    @objc private func hitSnapClip(_ sender: NSButton) { setSnapClipboard(sender.state == .on) }
+    @objc private func hitClapMute(_ sender: NSButton) { setClapMute(sender.state == .on) }
+    @objc private func hitIdleQuit(_ sender: NSButton) { setIdleQuit(sender.state == .on) }
+    @objc private func hitQuitSnaps(_ sender: NSButton) { setQuitSnaps(sender.state == .on) }
 }
 
 // MARK: - Camera
@@ -2150,15 +2293,25 @@ handRequest.maximumHandCount = 1
 var camera: Camera?
 var statusUI: StatusUI?
 var snapListener: SnapListener?
+var controlPanel: ControlPanel?
 var snapToClipboardEnabled = UserDefaults.standard.bool(forKey: "snapToClipboard")  // opt-in, persisted
 var clapMuteEnabled = UserDefaults.standard.bool(forKey: "clapMute")  // opt-in, persisted
 let muteQueue = DispatchQueue(label: "slingshot.mute")
+
+/// Confidence bars for the sound classifier, shared by the listener and the
+/// control panel's lamps. Claps get a lower bar: a single real-room clap
+/// scores well under a crisp close-mic snap, and a mute misfire is cheap.
+let snapConfidenceThreshold = 0.5
+let clapConfidenceThreshold = 0.35
 
 /// Quit entirely after this long with no hand in view, no sound trigger,
 /// and no transfer in flight. Three quick snaps quit on the spot.
 let idleQuitAfter: TimeInterval = 10
 let quitSnapCount = 3
 let quitSnapWindow: TimeInterval = 5
+var quitSnapsEnabled: Bool = {
+    UserDefaults.standard.object(forKey: "quitSnaps") == nil || UserDefaults.standard.bool(forKey: "quitSnaps")
+}()
 var idleQuitEnabled: Bool = {
     // Default on: Slingshot leaves when nobody is playing with it.
     UserDefaults.standard.object(forKey: "idleQuit") == nil || UserDefaults.standard.bool(forKey: "idleQuit")
@@ -2228,11 +2381,15 @@ func startSnapListening() {
         let listener = SnapListener()
         listener.snapActionEnabled = { snapWakeEnabled || snapToClipboardEnabled }
         listener.clapActionEnabled = { clapMuteEnabled }
+        listener.onLevels = { snap, clap in
+            DispatchQueue.main.async { controlPanel?.levels(snap: snap, clap: clap) }
+        }
         listener.onSnap = {
             noteActivity()
+            controlPanel?.flash(.snap)
             recentSnapFires.append(Date())
             recentSnapFires.removeAll { Date().timeIntervalSince($0) > quitSnapWindow }
-            if recentSnapFires.count >= quitSnapCount {
+            if quitSnapsEnabled, recentSnapFires.count >= quitSnapCount {
                 quitSlingshot("\(quitSnapCount) snaps")
                 return
             }
@@ -2257,6 +2414,7 @@ func startSnapListening() {
         }
         listener.onClap = {
             noteActivity()
+            controlPanel?.flash(.clap)
             guard clapMuteEnabled else { return }
             // Serial queue: back-to-back claps must toggle in order, never race.
             muteQueue.async {
@@ -2304,6 +2462,80 @@ func startSnapListening() {
         log("🎤 Microphone denied. Enable Slingshot in System Settings, Privacy and Security, Microphone")
         if snapWakeEnabled { wakeCamera("microphone denied, always-on fallback") }
     }
+}
+
+// MARK: - Feature switches (shared by the menu bar and the control panel)
+
+func stopSoundListenerIfUnused() {
+    if !snapWakeEnabled && !snapToClipboardEnabled && !clapMuteEnabled {
+        snapListener?.stop()
+        snapListener = nil
+    }
+}
+
+func refreshControls() {
+    statusUI?.refresh()
+    controlPanel?.refreshStatus()
+}
+
+func setSnapWake(_ on: Bool) {
+    snapWakeEnabled = on
+    UserDefaults.standard.set(on, forKey: "snapWake")
+    if on {
+        log("🫰 Snap-to-wake on. The camera sleeps when idle")
+        startSnapListening()
+        scheduleWorkDoneSleep()
+    } else {
+        log("👁️ Camera always on")
+        wakeCamera("always-on mode")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setSnapClipboard(_ on: Bool) {
+    snapToClipboardEnabled = on
+    UserDefaults.standard.set(on, forKey: "snapToClipboard")
+    if on {
+        log("🫰 Snap-to-clipboard on")
+        startSnapListening()
+    } else {
+        log("🔇 Snap-to-clipboard off")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setClapMute(_ on: Bool) {
+    clapMuteEnabled = on
+    UserDefaults.standard.set(on, forKey: "clapMute")
+    if on {
+        log("👏 Clap-to-mute on")
+        startSnapListening()
+    } else {
+        log("🔇 Clap-to-mute off")
+        stopSoundListenerIfUnused()
+    }
+    refreshControls()
+}
+
+func setIdleQuit(_ on: Bool) {
+    idleQuitEnabled = on
+    UserDefaults.standard.set(on, forKey: "idleQuit")
+    if on {
+        noteActivity()  // fresh grace period, not an instant quit
+        log("⏻ Auto-quit on. \(Int(idleQuitAfter)) idle seconds and Slingshot leaves")
+    } else {
+        log("⏻ Auto-quit off. Slingshot stays until told otherwise")
+    }
+    refreshControls()
+}
+
+func setQuitSnaps(_ on: Bool) {
+    quitSnapsEnabled = on
+    UserDefaults.standard.set(on, forKey: "quitSnaps")
+    log(on ? "🫰 Three quick snaps quit Slingshot" : "🫰 Triple-snap quit off")
+    refreshControls()
 }
 
 func startEverything() {
@@ -2448,6 +2680,11 @@ func startEverything() {
 
     startSnapListening()
 }
+
+// The control panel exists from the first moment, permission prompts included,
+// so there is always a place that shows WHY something is not happening.
+controlPanel = ControlPanel()
+controlPanel?.show()
 
 switch AVCaptureDevice.authorizationStatus(for: .video) {
 case .authorized:
