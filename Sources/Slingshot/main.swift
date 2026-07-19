@@ -1718,10 +1718,10 @@ func startEverything() {
         wakeCamera("always-on mode")
     }
 
-    // Doze off when no hand has shown up for a while and nothing is pending.
-    Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+    // Doze off after 30 seconds without a hand in view and nothing pending.
+    Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
         guard snapWakeEnabled, let cam = camera, cam.isRunning else { return }
-        if Date().timeIntervalSince(frameStore.lastHand()) > 45 {
+        if Date().timeIntervalSince(frameStore.lastHand()) > 30 {
             sleepCamera("idle")
         }
     }
