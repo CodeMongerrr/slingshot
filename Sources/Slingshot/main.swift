@@ -77,8 +77,12 @@ let faceMatchThreshold: Float = 0.55
 final class FrameStore {
     private let lock = NSLock()
     private var buffer: CVPixelBuffer?
+    private var handAt = Date.distantPast
     func set(_ pb: CVPixelBuffer) { lock.withLock { buffer = pb } }
     func latest() -> CVPixelBuffer? { lock.withLock { buffer } }
+    func clear() { lock.withLock { buffer = nil } }
+    func markHand() { lock.withLock { handAt = Date() } }
+    func lastHand() -> Date { lock.withLock { handAt } }
 }
 let frameStore = FrameStore()
 
@@ -1049,6 +1053,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             log("⌛️ Hold expired. Screenshot saved locally")
             NotchIsland.shared.clearPersist()
             NotchIsland.shared.pulse("hourglass", NotchIsland.Palette.ash, "Hold expired. Saved to Pictures/Slingshot")
+            scheduleWorkDoneSleep()
         }
     }
 
@@ -1145,6 +1150,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
                     NotchIsland.shared.pulse("checkmark.seal.fill", NotchIsland.Palette.mint, "Dropped on \(cleanName(peer.displayName))")
                     play("Purr")
                 }
+                scheduleWorkDoneSleep()
             }
         }
     }
@@ -1215,6 +1221,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
                 remoteHolders[id] = RemoteHold(deadline: Date().addingTimeInterval(holdWindow + 2),
                                                mode: mode, face: face)
             }
+            DispatchQueue.main.async { wakeCamera("incoming hold") }
             log("🫴 \(id.displayName) is holding a screenshot. Hold a fist for 1 second, then open your hand to catch it here")
             DispatchQueue.main.async {
                 play("Tink")
@@ -1230,6 +1237,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
             }
             if !anyLeft {
                 DispatchQueue.main.async { NotchIsland.shared.clearPersist() }
+                scheduleWorkDoneSleep()
             }
         case "catch":
             let url: URL? = lock.withLock {
@@ -1301,6 +1309,7 @@ final class PeerLink: NSObject, MCSessionDelegate, MCNearbyServiceAdvertiserDele
         } catch {
             log("❌ Could not save received file: \(error)")
         }
+        scheduleWorkDoneSleep()
     }
 }
 
@@ -1318,11 +1327,12 @@ final class StatusUI: NSObject {
         let connected = link.session.connectedPeers.sorted { $0.displayName < $1.displayName }
         let nearby = link.nearbyPeers
         NotchIsland.shared.setPresence(connected.count)
-        let base = connected.isEmpty ? "✊…" : "✊ \(connected.count)"
+        let fist = (camera?.isRunning ?? false) ? "✊" : "🫰"
+        let base = connected.isEmpty ? "\(fist)…" : "\(fist) \(connected.count)"
         item.button?.title = base + (currentMode == .normal ? " N" : " P")
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Slingshot v1.2", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Slingshot v1.3", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
 
         menu.addItem(withTitle: "Mode", action: nil, keyEquivalent: "")
@@ -1336,6 +1346,12 @@ final class StatusUI: NSObject {
         menu.addItem(proItem)
         menu.addItem(.separator())
 
+        let cameraState = (camera?.isRunning ?? false) ? "Camera awake" : "Camera asleep. Snap to wake"
+        menu.addItem(withTitle: cameraState, action: nil, keyEquivalent: "")
+        let wakeItem = NSMenuItem(title: "Snap wakes the camera", action: #selector(toggleSnapWake), keyEquivalent: "")
+        wakeItem.target = self
+        wakeItem.state = snapWakeEnabled ? .on : .off
+        menu.addItem(wakeItem)
         let snapItem = NSMenuItem(title: "Snap fingers for a clipboard screenshot", action: #selector(toggleSnap), keyEquivalent: "")
         snapItem.target = self
         snapItem.state = snapToClipboardEnabled ? .on : .off
@@ -1388,8 +1404,28 @@ final class StatusUI: NSObject {
             startSnapListening()
         } else {
             log("🔇 Snap-to-clipboard off")
-            snapListener?.stop()
-            snapListener = nil
+            if !snapWakeEnabled {
+                snapListener?.stop()
+                snapListener = nil
+            }
+        }
+        refresh()
+    }
+
+    @objc private func toggleSnapWake() {
+        snapWakeEnabled.toggle()
+        UserDefaults.standard.set(snapWakeEnabled, forKey: "snapWake")
+        if snapWakeEnabled {
+            log("🫰 Snap-to-wake on. The camera sleeps when idle")
+            startSnapListening()
+            scheduleWorkDoneSleep()
+        } else {
+            log("👁️ Camera always on")
+            wakeCamera("always-on mode")
+            if !snapToClipboardEnabled {
+                snapListener?.stop()
+                snapListener = nil
+            }
         }
         refresh()
     }
@@ -1417,10 +1453,27 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         super.init()
     }
 
+    private var configured = false
+    private var deviceName = "camera"
+
+    var isRunning: Bool { session.isRunning }
+
+    func stop() {
+        guard session.isRunning else { return }
+        session.stopRunning()
+    }
+
     func start() throws {
+        if configured {
+            guard !session.isRunning else { return }
+            session.startRunning()
+            log("🎥 Camera awake (\(deviceName))")
+            return
+        }
         guard let device = AVCaptureDevice.default(for: .video) else {
             throw RuntimeError("No camera found")
         }
+        deviceName = device.localizedName
         session.sessionPreset = .vga640x480
         let input = try AVCaptureDeviceInput(device: device)
         guard session.canAddInput(input) else { throw RuntimeError("Cannot use camera input") }
@@ -1432,6 +1485,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         guard session.canAddOutput(output) else { throw RuntimeError("Cannot attach video output") }
         session.addOutput(output)
 
+        configured = true
         session.startRunning()
         log("🎥 Camera running (\(device.localizedName))")
     }
@@ -1446,7 +1500,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v1.2. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v1.3. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -1461,15 +1515,61 @@ var camera: Camera?
 var statusUI: StatusUI?
 var snapListener: SnapListener?
 var snapToClipboardEnabled = UserDefaults.standard.bool(forKey: "snapToClipboard")  // opt-in, persisted
+var snapWakeEnabled: Bool = {
+    // Default on: the camera sleeps until a snap wakes it.
+    UserDefaults.standard.object(forKey: "snapWake") == nil || UserDefaults.standard.bool(forKey: "snapWake")
+}()
+
+func wakeCamera(_ reason: String) {
+    guard let cam = camera, !cam.isRunning else { return }
+    do {
+        try cam.start()
+        frameStore.markHand()
+        log("👁️ Camera awake (\(reason))")
+        DispatchQueue.main.async {
+            play("Tink")
+            NotchIsland.shared.pulse("eye.fill", NotchIsland.Palette.ice, "Camera awake. Palm to grab")
+            statusUI?.refresh()
+        }
+    } catch {
+        log("❌ Camera failed to wake: \(error)")
+    }
+}
+
+func sleepCamera(_ reason: String) {
+    guard snapWakeEnabled, let cam = camera, cam.isRunning else { return }
+    guard !link.isHolding, !link.hasRemoteHold else { return }
+    cam.stop()
+    frameStore.clear()
+    log("😴 Camera asleep (\(reason)). Snap to wake")
+    DispatchQueue.main.async {
+        NotchIsland.shared.pulse("moon.zzz.fill", NotchIsland.Palette.ash, "Camera asleep. Snap to wake")
+        statusUI?.refresh()
+    }
+}
+
+/// Called when a transfer finishes: doze off unless a hand is still around.
+func scheduleWorkDoneSleep() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+        if Date().timeIntervalSince(frameStore.lastHand()) > 3 {
+            sleepCamera("work done")
+        }
+    }
+}
 
 /// Bring up the snap listener if the user turned it on. Requests microphone access
 /// on first use; denial leaves the camera features untouched.
 func startSnapListening() {
-    guard snapToClipboardEnabled, snapListener == nil else { return }
+    guard snapWakeEnabled || snapToClipboardEnabled, snapListener == nil else { return }
 
     let begin = {
         let listener = SnapListener()
         listener.onSnap = {
+            if snapWakeEnabled, let cam = camera, !cam.isRunning {
+                wakeCamera("snap")
+                return
+            }
+            guard snapToClipboardEnabled else { return }
             log("🫰 Snap! Copying a screenshot to the clipboard…")
             DispatchQueue.global(qos: .userInitiated).async {
                 let ok = copyScreenshotToClipboard()
@@ -1502,13 +1602,15 @@ func startSnapListening() {
                 if ok {
                     begin()
                 } else {
-                    log("🎤 Microphone denied. Snap-to-clipboard stays off")
-                    NotchIsland.shared.pulse("mic.slash.fill", NotchIsland.Palette.ash, "Enable Microphone to snap for screenshots")
+                    log("🎤 Microphone denied. Snap features stay off")
+                    NotchIsland.shared.pulse("mic.slash.fill", NotchIsland.Palette.ash, "Enable Microphone for snap features")
+                    if snapWakeEnabled { wakeCamera("microphone denied, always-on fallback") }
                 }
             }
         }
     default:
         log("🎤 Microphone denied. Enable Slingshot in System Settings, Privacy and Security, Microphone")
+        if snapWakeEnabled { wakeCamera("microphone denied, always-on fallback") }
     }
 }
 
@@ -1598,6 +1700,7 @@ func startEverything() {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         guard (try? handler.perform([handRequest])) != nil else { return }
         if let obs = handRequest.results?.first {
+            frameStore.markHand()
             let (pose, wrist, debug) = classify(obs)
             engine.update(pose: pose, wrist: wrist, debug: debug)
         } else {
@@ -1606,15 +1709,24 @@ func startEverything() {
     }
     camera = cam
 
-    do {
-        try cam.start()
-    } catch {
-        log("❌ Camera failed: \(error)")
-        app.terminate(nil)
-        return
+    if snapWakeEnabled {
+        log("😴 Camera starts asleep. Snap your fingers to wake it")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            NotchIsland.shared.pulse("moon.zzz.fill", NotchIsland.Palette.ash, "Snap your fingers to wake the camera", seconds: 4)
+        }
+    } else {
+        wakeCamera("always-on mode")
     }
 
-    log("🙌 Ready. Hold your palm open and still for 2 seconds, then hold your fist for 1 second to grab.")
+    // Doze off when no hand has shown up for a while and nothing is pending.
+    Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+        guard snapWakeEnabled, let cam = camera, cam.isRunning else { return }
+        if Date().timeIntervalSince(frameStore.lastHand()) > 45 {
+            sleepCamera("idle")
+        }
+    }
+
+    log("🙌 Ready. Snap to wake the camera, palm 2 seconds to arm, fist 1 second to grab.")
 
     startSnapListening()
 }

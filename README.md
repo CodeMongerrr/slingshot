@@ -8,6 +8,7 @@ https://github.com/Giri-Aayush/slingshot
 
 ## How it works
 
+- **Snap to wake** (on by default): the camera sleeps until Apple's on-device sound classifier hears a finger snap. Snap, the notch pulses "Camera awake", and the hand gestures work as usual. It dozes back off a few seconds after a transfer completes, or after 45 seconds without a hand in view, and an incoming hold wakes it automatically so catching needs no snap. Turn it off in the menu bar for an always-on camera. If the microphone is denied, the camera falls back to always-on.
 - **Gesture detection**: Apple's Vision framework (`VNDetectHumanHandPoseRequest`) tracks 21 hand joints from the FaceTime camera at ~15 fps. Gestures are deliberate by design: 2 s of steady open palm arms (Tink), 1 s of held fist grabs (Pop), and a drop is 1 s of fist then half a second of open hand. A moving wrist resets the timers, so waving or talking with your hands never triggers anything. Fingertips that Vision loses sight of count as curled, which keeps fist detection solid when fingers occlude themselves.
 - **Screenshot**: `/usr/sbin/screencapture` grabs the full desktop to `~/Pictures/Slingshot/`.
 - **Snap to clipboard** (opt-in, off by default): Apple's on-device sound classifier listens for a finger snap and copies a full screenshot straight to the clipboard, ready for Cmd-V. Toggle it from the menu bar. Audio is analyzed locally and never leaves the Mac.
@@ -24,7 +25,7 @@ There is no sender or receiver role. Every copy of the app does both, and it is 
 2. The app is signed with a development certificate, not notarized, so Gatekeeper will balk. Either:
    - run `xattr -dr com.apple.quarantine /path/to/Slingshot.app`, or
    - try to open it once, then System Settings → Privacy & Security → scroll to Security → **Open Anyway**.
-3. Open the app. Approve the **Camera** and **Local Network** prompts. Microphone is only requested if you turn on snap-to-clipboard.
+3. Open the app. Approve the **Camera** and **Local Network** prompts. Approve **Microphone** too: a snap is what wakes the camera (audio never leaves the Mac; disable snap-to-wake in the menu bar to skip this).
 4. Grant **Screen Recording** (System Settings → Privacy & Security → Screen & System Audio Recording → enable Slingshot), then quit and reopen the app. That permission only applies at launch.
 5. Look for the **✊ icon in the menu bar**. When a second Mac on the same Wi-Fi runs the app, it flips to ✊✓ within seconds.
 

@@ -11,9 +11,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2</string>
+	<string>1.3</string>
 	<key>CFBundleVersion</key>
-	<string>12</string>
+	<string>13</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
@@ -28,6 +28,6 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Slingshot finds nearby Macs running Slingshot to beam your screenshot to.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Slingshot listens for a finger snap to copy a screenshot to your clipboard. Off by default.</string>
+	<string>Slingshot listens for a finger snap to wake the camera and to copy screenshots to your clipboard. Audio never leaves your Mac.</string>
 </dict>
 </plist>
