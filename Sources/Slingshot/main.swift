@@ -1,5 +1,7 @@
 import AVFoundation
 import AppKit
+import AudioToolbox
+import CoreAudio
 import CoreImage
 import MultipeerConnectivity
 import SoundAnalysis
@@ -1286,14 +1288,119 @@ func copyScreenshotToClipboard() -> Bool {
     return p.terminationStatus == 0
 }
 
-// MARK: - Finger-snap listener
+// MARK: - System mute
 
-/// Fires onSnap when Apple's on-device sound classifier hears a finger snap.
-/// All analysis is local; no audio leaves the Mac. Debounced so one snap fires once.
+/// Toggle the default output device's mute. Returns the new state (true = now
+/// muted), or nil if the device refused. Blocking; call off the main thread.
+/// CoreAudio first; devices with no mute control fall back to AppleScript's
+/// system volume setting.
+func toggleSystemOutputMute() -> Bool? {
+    if let muted = coreAudioToggleMute() { return muted }
+    let script = """
+    set volume output muted not (output muted of (get volume settings))
+    output muted of (get volume settings)
+    """
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", script]
+    let out = Pipe()
+    p.standardOutput = out
+    do {
+        try p.run()
+        p.waitUntilExit()
+    } catch {
+        log("❌ osascript mute fallback failed to launch: \(error)")
+        return nil
+    }
+    guard p.terminationStatus == 0 else { return nil }
+    let answer = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return answer.map { $0 == "true" }
+}
+
+/// The Mac's built-in microphone, if it has one with input streams. Bluetooth
+/// speakers hijack the default-input role the moment they connect, and their
+/// far-field mics hear nothing useful — sound features pin to this instead.
+func builtInInputDeviceID() -> AudioDeviceID? {
+    var listAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &size) == noErr,
+          size > 0 else { return nil }
+    var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &size, &devices) == noErr
+    else { return nil }
+
+    for device in devices {
+        var transportAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var tSize = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &transportAddr, 0, nil, &tSize, &transport) == noErr,
+              transport == kAudioDeviceTransportTypeBuiltIn else { continue }
+        var streamsAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var sSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &streamsAddr, 0, nil, &sSize) == noErr, sSize > 0 else { continue }
+        return device
+    }
+    return nil
+}
+
+private func coreAudioToggleMute() -> Bool? {
+    var device = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    var deviceAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &deviceAddr,
+                                     0, nil, &size, &device) == noErr,
+          device != kAudioObjectUnknown else { return nil }
+
+    var muteAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyMute,
+        mScope: kAudioDevicePropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain)
+    var settable = DarwinBoolean(false)
+    guard AudioObjectHasProperty(device, &muteAddr),
+          AudioObjectIsPropertySettable(device, &muteAddr, &settable) == noErr,
+          settable.boolValue else { return nil }
+
+    var muted: UInt32 = 0
+    var muteSize = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(device, &muteAddr, 0, nil, &muteSize, &muted) == noErr else { return nil }
+    var flipped: UInt32 = muted == 0 ? 1 : 0
+    guard AudioObjectSetPropertyData(device, &muteAddr, 0, nil, muteSize, &flipped) == noErr else { return nil }
+    return flipped == 1
+}
+
+// MARK: - Finger-snap and clap listener
+
+/// Fires onSnap when Apple's on-device sound classifier hears a finger snap,
+/// onClap when it hears a clap. All analysis is local; no audio leaves the Mac.
+/// One shared debounce covers both: a snap and a clap are near-identical
+/// transients, so the higher-confidence class wins the window and fires alone.
 final class SnapListener: NSObject, SNResultsObserving {
     var onSnap: () -> Void = {}
+    var onClap: () -> Void = {}
+    /// Whether each action currently has a consumer. Only enabled actions compete
+    /// for a sound window, so a class nobody listens to can never win the window
+    /// and burn the shared debounce for the one that would have acted.
+    var snapActionEnabled: () -> Bool = { true }
+    var clapActionEnabled: () -> Bool = { true }
     var confidenceThreshold: Double = 0.5
+    /// Claps get a lower bar: a single real-room clap scores well under a crisp
+    /// close-mic snap, and mute toggling is cheap to undo if it misfires.
+    var clapConfidenceThreshold: Double = 0.35
     var debounce: TimeInterval = 1.2
+    var debugLogging = true
 
     private let audio = AVAudioEngine()
     private var analyzer: SNAudioStreamAnalyzer?
@@ -1304,6 +1411,19 @@ final class SnapListener: NSObject, SNResultsObserving {
     func start() throws {
         guard !audio.isRunning else { return }
         let input = audio.inputNode
+        // Pin the built-in mic before reading the format: a connected Bluetooth
+        // speaker's distant mic is the default input, and it hears no claps.
+        if let builtIn = builtInInputDeviceID(), let unit = input.audioUnit {
+            var device = builtIn
+            let err = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                           kAudioUnitScope_Global, 0, &device,
+                                           UInt32(MemoryLayout<AudioDeviceID>.size))
+            if err == noErr {
+                log("🎙️ Listening on the built-in microphone")
+            } else {
+                log("⚠️ Could not pin the built-in microphone (err \(err)). Using the system input")
+            }
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw RuntimeError("Microphone input unavailable")
@@ -1313,6 +1433,10 @@ final class SnapListener: NSObject, SNResultsObserving {
         let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
         guard request.knownClassifications.contains("finger_snapping") else {
             throw RuntimeError("Sound classifier has no finger_snapping class")
+        }
+        if !request.knownClassifications.contains("clapping") {
+            // Snaps still work; claps just will not fire on this OS's classifier.
+            log("⚠️ Sound classifier has no clapping class. Clap-to-mute unavailable")
         }
         // High overlap trades a little CPU for catching a snap anywhere in the window.
         request.overlapFactor = 0.75
@@ -1327,7 +1451,7 @@ final class SnapListener: NSObject, SNResultsObserving {
         }
         audio.prepare()
         try audio.start()
-        log("🫰 Listening for finger snaps. A snap copies a screenshot to the clipboard")
+        log("🫰 Listening for finger snaps and claps")
     }
 
     func stop() {
@@ -1340,13 +1464,25 @@ final class SnapListener: NSObject, SNResultsObserving {
     }
 
     func request(_ request: SNRequest, didProduce result: SNResult) {
-        guard let result = result as? SNClassificationResult,
-              let snap = result.classification(forIdentifier: "finger_snapping"),
-              snap.confidence >= confidenceThreshold else { return }
+        guard let result = result as? SNClassificationResult else { return }
+        let snapConfidence = result.classification(forIdentifier: "finger_snapping")?.confidence ?? 0
+        // Room acoustics smear a single clap across "clapping" and "applause".
+        let clapConfidence = max(result.classification(forIdentifier: "clapping")?.confidence ?? 0,
+                                 result.classification(forIdentifier: "applause")?.confidence ?? 0)
+        if debugLogging, max(snapConfidence, clapConfidence) >= 0.1 {
+            log(String(format: "   · sound → snap %.2f clap %.2f", snapConfidence, clapConfidence))
+        }
+        let snapEligible = snapActionEnabled() && snapConfidence >= confidenceThreshold
+        let clapEligible = clapActionEnabled() && clapConfidence >= clapConfidenceThreshold
+        guard snapEligible || clapEligible else { return }
+        let isSnap = snapEligible && (!clapEligible || snapConfidence >= clapConfidence)
         let now = Date()
         guard now.timeIntervalSince(lastFire) >= debounce else { return }
         lastFire = now
-        DispatchQueue.main.async { [weak self] in self?.onSnap() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if isSnap { self.onSnap() } else { self.onClap() }
+        }
     }
 
     func request(_ request: SNRequest, didFailWithError error: Error) {
@@ -1820,6 +1956,10 @@ final class StatusUI: NSObject {
         snapItem.target = self
         snapItem.state = snapToClipboardEnabled ? .on : .off
         menu.addItem(snapItem)
+        let clapItem = NSMenuItem(title: "Clap to mute or unmute the Mac", action: #selector(toggleClap), keyEquivalent: "")
+        clapItem.target = self
+        clapItem.state = clapMuteEnabled ? .on : .off
+        menu.addItem(clapItem)
         menu.addItem(.separator())
         if connected.isEmpty && nearby.isEmpty {
             menu.addItem(withTitle: "Searching for nearby Macs…", action: nil, keyEquivalent: "")
@@ -1868,7 +2008,23 @@ final class StatusUI: NSObject {
             startSnapListening()
         } else {
             log("🔇 Snap-to-clipboard off")
-            if !snapWakeEnabled {
+            if !snapWakeEnabled && !clapMuteEnabled {
+                snapListener?.stop()
+                snapListener = nil
+            }
+        }
+        refresh()
+    }
+
+    @objc private func toggleClap() {
+        clapMuteEnabled.toggle()
+        UserDefaults.standard.set(clapMuteEnabled, forKey: "clapMute")
+        if clapMuteEnabled {
+            log("👏 Clap-to-mute on")
+            startSnapListening()
+        } else {
+            log("🔇 Clap-to-mute off")
+            if !snapWakeEnabled && !snapToClipboardEnabled {
                 snapListener?.stop()
                 snapListener = nil
             }
@@ -1886,7 +2042,7 @@ final class StatusUI: NSObject {
         } else {
             log("👁️ Camera always on")
             wakeCamera("always-on mode")
-            if !snapToClipboardEnabled {
+            if !snapToClipboardEnabled && !clapMuteEnabled {
                 snapListener?.stop()
                 snapListener = nil
             }
@@ -1964,7 +2120,7 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 // MARK: - Main
 
-log("Slingshot v1.8.3. Palm then fist to sling a screenshot; snap your fingers for a clipboard copy")
+log("Slingshot v1.8.3. Palm then fist to sling a screenshot; snap for a clipboard copy; clap to mute")
 
 // A real NSApplication event loop so Finder/LaunchServices see the app check in.
 // Without this, a double-clicked launch gets flagged "not responding".
@@ -1979,6 +2135,8 @@ var camera: Camera?
 var statusUI: StatusUI?
 var snapListener: SnapListener?
 var snapToClipboardEnabled = UserDefaults.standard.bool(forKey: "snapToClipboard")  // opt-in, persisted
+var clapMuteEnabled = UserDefaults.standard.bool(forKey: "clapMute")  // opt-in, persisted
+let muteQueue = DispatchQueue(label: "slingshot.mute")
 var snapWakeEnabled: Bool = {
     // Default on: the camera sleeps until a snap wakes it.
     UserDefaults.standard.object(forKey: "snapWake") == nil || UserDefaults.standard.bool(forKey: "snapWake")
@@ -2018,13 +2176,18 @@ func scheduleWorkDoneSleep() {
     }
 }
 
-/// Bring up the snap listener if the user turned it on. Requests microphone access
-/// on first use; denial leaves the camera features untouched.
+/// Bring up the snap/clap listener if any sound feature is on. Requests microphone
+/// access on first use; denial leaves the camera features untouched.
 func startSnapListening() {
-    guard snapWakeEnabled || snapToClipboardEnabled, snapListener == nil else { return }
+    guard snapWakeEnabled || snapToClipboardEnabled || clapMuteEnabled, snapListener == nil else { return }
 
     let begin = {
+        // Re-check: the mic prompt takes arbitrarily long, and the user may have
+        // toggled features (or another call may have begun a listener) meanwhile.
+        guard snapListener == nil, snapWakeEnabled || snapToClipboardEnabled || clapMuteEnabled else { return }
         let listener = SnapListener()
+        listener.snapActionEnabled = { snapWakeEnabled || snapToClipboardEnabled }
+        listener.clapActionEnabled = { clapMuteEnabled }
         listener.onSnap = {
             if snapWakeEnabled, let cam = camera, !cam.isRunning {
                 wakeCamera("snap")
@@ -2042,6 +2205,26 @@ func startSnapListening() {
                     } else {
                         NotchIsland.shared.compact("exclamationmark.triangle.fill", NotchIsland.Palette.coral, "Failed", kind: .outcome)
                     }
+                }
+            }
+        }
+        listener.onClap = {
+            guard clapMuteEnabled else { return }
+            // Serial queue: back-to-back claps must toggle in order, never race.
+            muteQueue.async {
+                guard let nowMuted = toggleSystemOutputMute() else {
+                    log("❌ Clap heard, but the output device refused the mute toggle")
+                    DispatchQueue.main.async {
+                        NotchIsland.shared.compact("exclamationmark.triangle.fill", NotchIsland.Palette.coral, "Mute failed", kind: .outcome)
+                    }
+                    return
+                }
+                log(nowMuted ? "👏 Clap! System sound muted" : "👏 Clap! System sound back on")
+                DispatchQueue.main.async {
+                    if !nowMuted { play("Pop") }  // a mute confirmation would be inaudible
+                    NotchIsland.shared.compact(nowMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                                               nowMuted ? NotchIsland.Palette.ash : NotchIsland.Palette.mint,
+                                               nowMuted ? "Muted" : "Sound on", kind: .outcome)
                 }
             }
         }

@@ -28,6 +28,6 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Slingshot finds nearby Macs running Slingshot to beam your screenshot to.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Slingshot listens for a finger snap to wake the camera and to copy screenshots to your clipboard. Audio never leaves your Mac.</string>
+	<string>Slingshot listens for a finger snap to wake the camera and copy screenshots to your clipboard, and for a clap to mute or unmute the Mac. Audio never leaves your Mac.</string>
 </dict>
 </plist>
